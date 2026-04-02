@@ -10,7 +10,7 @@ const fs = require('fs');
 const path = require('path');
 
 // ========== CONFIGURAÇÕES ==========
-const DONO_NUMERO = ' 120363425231463609';   // ⚠️ SUBSTITUA PELO SEU NÚMERO (com código do país)
+const DONO_NUMERO = '120363425231463609@g.us';   // ⚠️ SUBSTITUA PELO SEU NÚMERO (com código do país)
 const COMMAND_PREFIX = '/';
 const DB_PATH = './database.db';
 const LOG_FILE = './bot.log';
@@ -97,8 +97,17 @@ client.on('qr', qr => {
     qrcode.generate(qr, { small: true });
     log('QR Code gerado. Escaneie com o WhatsApp.', 'INFO');
 });
+
 client.on('ready', () => log('Bot conectado com sucesso!', 'SUCESSO'));
+
 client.on('message', async message => {
+    // 🔧 CORREÇÃO: Garante que message.reply exista (especialmente em grupos)
+    if (!message.reply) {
+        message.reply = async (text) => {
+            await client.sendMessage(message.from, text);
+        };
+    }
+
     if (message.body.startsWith(COMMAND_PREFIX)) {
         log(`Comando de ${message.from}: ${message.body}`, 'RECV');
         await processCommand(message);
