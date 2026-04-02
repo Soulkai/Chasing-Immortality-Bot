@@ -345,7 +345,7 @@ function cmdMenu(message) {
     menu += `▢\n`;
     menu += `╰━━─「🎮」─━━`;
     
-    sendReply(message, menu);
+    client.sendMessage(message.from, menu).catch(err => log(`Erro ao enviar menu: ${err}`, 'ERRO'));
 }
 
 async function cmdGuia(args, message) {
