@@ -181,16 +181,9 @@ Este projeto está sob a licença MIT – veja o arquivo [LICENSE](LICENSE) para
 
 ## 📞 Contato
 
-Desenvolvido por [Seu Nome] – [seu-email@exemplo.com]  
-Links: [GitHub](https://github.com/seu-usuario) | [Discord](https://discord.gg/seu-convite)
+Desenvolvido por [Soulkai] – [5567981445060]  
 
 ---
 
 ⚡ *"A jornada para a imortalidade começa com um único comando."*
-```
 
----
-
-Salve esse conteúdo como `README.md` na raiz do seu projeto. Depois de dar push no GitHub, ele aparecerá lindamente formatado na página do repositório.
-
-Caso queira adicionar badges (status, versão, etc.) ou uma imagem de capa, posso ajudar a montar também!
