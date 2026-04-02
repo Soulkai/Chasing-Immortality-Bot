@@ -322,6 +322,7 @@ function cmdMenu(message) {
     message.reply(menu);
 }
 
+// ========== GUIAS E ATALHOS ==========
 async function cmdGuia(args, message) {
     if (!args.length) {
         message.reply(`📖 *Guias disponíveis:*\n/guia cultivo\n/guia batalha\n/guia profissao\n/guia social\n\nUse /guia <assunto> para detalhes.`);
@@ -331,44 +332,50 @@ async function cmdGuia(args, message) {
     let texto = '';
     switch (assunto) {
         case 'cultivo':
-            texto = `🌿 *Guia de Cultivo*\n\n` +
-                `O cultivo é dividido em dois caminhos: *Físico* (aumenta Força, Vigor, HP) e *Espiritual* (aumenta Inteligência, Espírito, Qi).\n` +
-                `Para cultivar, você precisa de uma técnica de meditação (geralmente recebida do seu clã).\n` +
-                `Use /cultivar [fisico|espiritual] – consome Qi e Fadiga. Ganhe XP para subir de subnível (1 a 9).\n` +
-                `Ao atingir subnível 9 com XP suficiente, você enfrentará a *Tribulação do Céu* – um combate desafiador para avançar de reino.\n` +
-                `Cada reino aumenta significativamente seus atributos e desbloqueia novas técnicas.`;
+            texto = `🌿 *Guia de Cultivo*\n\nO cultivo é dividido em dois caminhos: *Físico* (aumenta Força, Vigor, HP) e *Espiritual* (aumenta Inteligência, Espírito, Qi).\nPara cultivar, você precisa de uma técnica de meditação.\nUse /cultivar [fisico|espiritual] – consome Qi e Fadiga. Ganhe XP para subir de subnível (1 a 9).\nAo atingir subnível 9 com XP suficiente, você enfrentará a *Tribulação do Céu*.\nCada reino aumenta seus atributos e desbloqueia novas técnicas.`;
             break;
         case 'batalha':
-            texto = `⚔️ *Guia de Combate*\n\n` +
-                `O combate é por turnos. Você pode:\n` +
-                `• /atacar – causa dano baseado na Força e arma equipada.\n` +
-                `• /defender – reduz o dano recebido pela metade no próximo turno.\n` +
-                `• /usaritem <id> – consome um item do inventário (poções, pílulas).\n` +
-                `• /usartecnica <id> – usa uma técnica ofensiva ou defensiva que você aprendeu.\n` +
-                `• /fugir – tenta escapar (chance baseada na Agilidade).\n\n` +
-                `Quando um monstro ou jogador é derrotado, você ganha recompensas (ouro, XP, drops).`;
+            texto = `⚔️ *Guia de Combate*\n\nO combate é por turnos. Comandos:\n• /atacar – dano baseado na Força\n• /defender – reduz dano pela metade\n• /usaritem <id> – usa item do inventário\n• /usartecnica <id> – usa técnica aprendida\n• /fugir – tenta escapar (baseado na Agilidade)`;
             break;
         case 'profissao':
-            texto = `🛠️ *Guia de Profissões*\n\n` +
-                `Escolha uma profissão com /profissao escolher <nome>.\n` +
-                `Opções: Alquimista, Forjador, Médico, Mestre de Talismã, Mestre de Formações.\n` +
-                `Cada profissão permite craftar itens específicos com /craftar.\n` +
-                `Ganhe XP craftando e suba de nível para desbloquear receitas mais poderosas.\n` +
-                `Use /subirprofissao para evoluir de nível quando tiver XP suficiente.`;
+            texto = `🛠️ *Guia de Profissões*\n\nEscolha uma profissão com /profissao escolher <nome>.\nOpções: Alquimista, Forjador, Médico, Mestre de Talismã, Mestre de Formações.\nCraft com /craftar, ganhe XP e suba de nível com /subirprofissao.`;
             break;
         case 'social':
-            texto = `👥 *Guia Social*\n\n` +
-                `• /amigos – vê sua lista de amigos.\n` +
-                `• /adicionaramigo <id> – envia pedido de amizade.\n` +
-                `• /inimigo <id> – declara alguém como inimigo (afeta encontros PvP e karma).\n` +
-                `• /conversar <id> <msg> – envia mensagem privada.\n` +
-                `• /lerchat – lê mensagens não lidas.\n` +
-                `• Quando dois jogadores usam /andar na mesma região, podem se encontrar e interagir (batalha, troca, conversa).`;
+            texto = `👥 *Guia Social*\n\n• /amigos, /adicionaramigo, /inimigo\n• /conversar <id> <msg> e /lerchat\n• Ao usar /andar, você pode encontrar outros jogadores na mesma região.`;
             break;
         default:
             texto = `Assunto não encontrado. Use /guia sem argumentos para ver a lista.`;
     }
     message.reply(texto);
+}
+
+async function cmdRomper(args, message, telefone) {
+    const player = await ensurePlayerExists(telefone, message);
+    if (!player) return;
+    if (player.sub_fisico === 9 || player.sub_espiritual === 9) {
+        message.reply(`⚡ O céu escurece... Você sente a Tribulação do Céu se aproximar!\nContinue cultivando para enfrentar o desafio e avançar de reino.`);
+    } else {
+        message.reply(`Você ainda não atingiu o pico do seu reino atual. Continue cultivando para chegar ao subnível 9.`);
+    }
+}
+
+async function cmdJogadores(args, message, telefone) {
+    message.reply(`👥 *Jogadores próximos*\nFuncionalidade em desenvolvimento. Use /ranking para ver a lista geral.`);
+}
+async function cmdEncontrar(args, message, telefone) {
+    message.reply(`🔍 *Encontrar jogadores*\nUse /andar em uma região e aguarde eventos. Quando outro jogador também estiver explorando, vocês poderão se encontrar.`);
+}
+async function cmdTrocar(args, message, telefone) {
+    message.reply(`🔄 *Troca de itens*\nEm breve! Por enquanto, use /loja para comprar/vender.`);
+}
+async function cmdDuelar(args, message, telefone) {
+    message.reply(`⚔️ *Duelo PvP*\nPara duelar, ambos devem estar na mesma região e se encontrar via /andar. Em desenvolvimento.`);
+}
+async function cmdMercadoGlobal(args, message, telefone) {
+    message.reply(`🏪 *Mercado Global*\nEm desenvolvimento. Use /loja para comprar itens básicos.`);
+}
+async function cmdNPCInteragir(args, message, telefone) {
+    message.reply(`👤 Para interagir com NPCs, use /andar e aguarde os eventos. Quando um NPC aparecer, siga as opções numeradas com /escolha <número>.`);
 }
 
 function cmdAjuda(args, message) {
@@ -1239,7 +1246,7 @@ async function processCommand(message) {
     const args = parts.slice(1);
     const telefone = message.from.replace('@c.us', '');
 
- const commands = {
+const commands = {
     'registrar': cmdRegistrar,
     'perfil': cmdPerfil,
     'mudaraparencia': cmdMudarAparencia,
@@ -1285,7 +1292,6 @@ async function processCommand(message) {
     'daritem': cmdDarItem,
     'resetar': cmdResetar,
     'anuncio': cmdAnuncio,
-    // NOVOS COMANDOS:
     'guia': cmdGuia,
     'status': cmdPerfil,
     'atributos': cmdPerfil,
@@ -1297,7 +1303,7 @@ async function processCommand(message) {
     'mercado': cmdMercadoGlobal,
     'npc': cmdNPCInteragir,
     'interagir': cmdNPCInteragir
-    };
+};
     if (commands[cmd]) await commands[cmd](args, message, telefone);
     else await message.reply('Comando desconhecido. Use `/menu`.');
 }
