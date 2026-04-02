@@ -43,6 +43,34 @@ CREATE TABLE IF NOT EXISTS players (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Domínios disponíveis no jogo
+CREATE TABLE IF NOT EXISTS dominios (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    nome TEXT UNIQUE,
+    descricao TEXT,
+    andares INTEGER DEFAULT 5,
+    nivel_minimo INTEGER DEFAULT 1,
+    recompensa_base_ouro INTEGER DEFAULT 100,
+    item_raro_id INTEGER
+);
+
+-- Instâncias de domínio por jogador (progresso)
+CREATE TABLE IF NOT EXISTS dominio_instancias (
+    player_id INTEGER,
+    dominio_id INTEGER,
+    andar_atual INTEGER DEFAULT 1,
+    status TEXT DEFAULT 'em_andamento', -- 'em_andamento', 'concluido'
+    data_inicio DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(player_id) REFERENCES players(id),
+    FOREIGN KEY(dominio_id) REFERENCES dominios(id),
+    PRIMARY KEY (player_id, dominio_id)
+);
+
+-- Inserir domínios iniciais
+INSERT OR IGNORE INTO dominios (nome, descricao, andares, nivel_minimo, recompensa_base_ouro) VALUES
+('Caverna dos Espíritos', 'Uma caverna escura habitada por espíritos errantes.', 3, 1, 50),
+('Templo Antigo', 'Ruínas de um templo guardado por golems de pedra.', 5, 3, 150),
+('Pico da Tempestade', 'No topo da montanha, um dragão de relâmpago aguarda.', 7, 5, 300);
 -- Técnicas disponíveis no jogo
 CREATE TABLE IF NOT EXISTS tecnicas (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
