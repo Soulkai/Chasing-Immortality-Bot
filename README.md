@@ -1,190 +1,96 @@
-# 🧘‍♂️ Chasing Immortality – Bot de WhatsApp (Wuxia/Xianxia RPG)
+# Chasing Immortality — Gameplay V2
 
-> Um jogo de imortalidade, cultivação e aventura, diretamente no seu WhatsApp!
+Bot de WhatsApp para RPG Wuxia/Xianxia com foco em progressão, exploração e combate.
 
-**Chasing Immortality** é um bot para WhatsApp que transforma seu chat em um mundo de fantasia oriental, onde você pode registrar um personagem, cultivar artes marciais e espirituais, explorar regiões, lutar contra monstros, criar seitas, trocar itens e muito mais – tudo com comandos simples e uma experiência imersiva.
+## Novidades desta versão
 
----
+- Tribulação de reino funcional com `/romper [fisico|espiritual]`
+- Equipamentos com bônus reais em atributos, HP, Qi e Alma
+- Craft com chance de falha e qualidade de item
+- Bosses por região com mérito e drops raros
+- Quests completas de NPC
+- Perfil em estilo RPG com barras de estado
+- Menu atualizado com os novos comandos
 
-## ✨ Características
+## Comandos principais
 
-- 📝 **Registro completo** com geração aleatória de raça, clã, raiz espiritual (com elementos!), corpo divino e até a chance de nascer órfão.
-- 🧘 **Sistema de cultivo** – físico e espiritual, com reinos, subníveis, fadiga e Qi.
-- ⚔️ **Combate por turnos** contra monstros ou outros jogadores (PvP).
-- 🌍 **Exploração dinâmica** com eventos aleatórios, NPCs e encontros entre jogadores.
-- 🏛️ **Seitas (guildas)** – crie sua própria seita, convide membros, crie missões e construa uma biblioteca de técnicas.
-- 🎒 **Inventário, equipamentos, loja e mercado de players** – economia completa com moedas hierárquicas (Ouro, Pérolas Espirituais, Cristais, Essência Imortal).
-- 💼 **Profissões** (Alquimista, Forjador, Médico, Mestre de Talismã, Mestre de Formações) – craft e progressão.
-- 👥 **Sistema social** – amigos, inimigos, chat privado e mensagens offline.
-- 📜 **Missões pessoais** – jogadores podem criar e recompensar missões para outros.
-- 🧩 **Eventos mundiais** e **rankings** de força, riqueza, karma e reino.
-- 🖼️ **Avatar personalizado** – defina uma URL de imagem para seu personagem.
-- 🛡️ **Comandos de administração** para o dono do bot.
-- 💾 **Banco de dados SQLite** – leve, portátil e fácil de fazer backup.
+### Perfil e equipamento
+- `/perfil`
+- `/inventario`
+- `/equipamentos`
+- `/equipar <id_item>`
+- `/desequipar <slot>`
+- `/mudaraparencia <url>`
 
----
+### Cultivo
+- `/cultivar [fisico|espiritual]`
+- `/romper [fisico|espiritual]`
+- `/tecnicas`
+- `/compreender <id>`
+- `/aprender <id>`
+- `/descansar`
 
-## 🛠️ Tecnologias utilizadas
-
-- [Node.js](https://nodejs.org/) (v18+)
-- [whatsapp-web.js](https://wwebjs.dev/) – cliente não oficial do WhatsApp
-- [SQLite3](https://www.sqlite.org/) – banco de dados embutido
-- [qrcode-terminal](https://www.npmjs.com/package/qrcode-terminal) – exibe QR Code no terminal
-- [chalk](https://www.npmjs.com/package/chalk) – logs coloridos
-
----
-
-## 📋 Pré‑requisitos
-
-- **Node.js** versão 18 ou superior instalado.
-- Um **número de WhatsApp** secundário (não use seu número principal, pois a conta pode ser bloqueada pelo WhatsApp).
-- **Windows, Linux ou macOS** – o bot funciona em qualquer sistema onde Node.js rode.
-
----
-
-## 🚀 Instalação e execução
-
-### 1. Clone o repositório
-
-```bash
-git clone https://github.com/Soulkai/Chasing-Immortality-Bot.git
-cd Chasing-Immortality-Bot
-```
-
-### 2. Instale as dependências
-
-```bash
-npm install
-```
-
-### 3. Configure o número do dono
-
-Edite o arquivo `bot.js` e substitua a constante `DONO_NUMERO` pelo seu número de WhatsApp **com código do país** (ex: `5511999999999` para Brasil).
-
-```javascript
-const DONO_NUMERO = '5511999999999';
-```
-
-### 4. Inicie o bot
-
-```bash
-node bot.js
-```
-
-No **Windows**, você também pode dar duplo clique no arquivo `start.bat`.
-
-### 5. Escaneie o QR Code
-
-Um QR Code aparecerá no terminal. Abra o WhatsApp no celular → Configurações → Dispositivos conectados → Conectar um dispositivo → Escaneie o código.
-
-### 6. Pronto!
-
-O bot estará online e responderá aos comandos enviados de qualquer contato registrado.
-
-> ⚠️ **Importante:** Mantenha o terminal aberto enquanto o bot estiver rodando. Para parar, pressione `Ctrl + C`.
-
----
-
-## 📜 Comandos principais
-
-Todos os comandos começam com `/`. Use `/menu` para ver a lista completa.
-
-> Durante o cadastro guiado, as respostas das perguntas morais podem ser enviadas apenas com `1`, `2`, `3` ou `4`, sem precisar usar `/`.
-
-| Comando | Descrição |
-|---------|------------|
-| `/registrar <nome> <M/F>` | Cria seu personagem (nome e sexo). |
-| `/perfil` | Exibe seus atributos, reinos e avatar. |
-| `/cultivar [fisico|espiritual]` | Treina cultivo (requer técnica de meditação). |
-| `/andar` | Explora a região atual (eventos a cada 5 min). |
-| `/inventario` | Lista itens que você possui. |
-| `/usar <id_item>` ou `/usaritem <id_item>` | Usa um item (poção, pílula, etc.). |
-| `/equipar <id_item>` | Equipa arma/armadura/artefato. |
-| `/loja` | Compra/vende itens da loja do jogo. |
-| `/mercado` | Mercado entre jogadores. |
-| `/criarseita <nome> <desc>` | Cria uma seita (custo 1000 ouro ou 1 cristal). |
-| `/convidar <id_jogador>` | Convida alguém para sua seita. |
-| `/missoes` | Lista missões da seita. |
-| `/profissao escolher <nome>` | Escolha uma profissão (Alquimista, Forjador, etc.). |
-| `/amigos` | Lista seus amigos. |
-| `/conversar <id> <msg>` | Envia mensagem privada para outro jogador. |
-| `/criarmissao <desc> <recompensa>` | Cria uma missão para outros jogadores. |
-| `/ranking [forca|reino|riqueza|karma]` | Top 10 do ranking. |
-| `/mudaraparencia <URL>` | Define uma imagem de perfil (jpg, png, etc.). |
-| `/menu` | Exibe todos os comandos organizados. |
-| `/ajuda <comando>` | Mostra ajuda detalhada. |
-
-### Comandos de combate (quando em batalha)
-
+### Exploração e combate
+- `/andar [regiao]`
+- `/parar`
+- `/bosses`
+- `/boss <id|nome>`
+- `/dominio`
+- `/dominio entrar <nome>`
+- `/dominio continuar`
 - `/atacar`
 - `/defender`
 - `/usaritem <id>`
+- `/usartecnica <id>`
 - `/fugir`
-- `/usartecnica <id_tecnica>`
 
-### Comandos de administração (apenas o dono)
+### NPCs e missões
+- `/npc`
+- `/npc aceitar <id_quest>`
+- `/npc entregar <id_quest>`
+- `/missoesnpc`
+- `/missoes`
+- `/aceitar <id>`
+- `/completarmissao <id>`
+- `/criarmissao <descricao> <recompensa>`
+- `/missoesdisponiveis`
+- `/minhasmissoes`
 
-- `/banir <id> [motivo]`
-- `/daritem <id_jogador> <id_item> <quantidade>`
-- `/resetar <id_jogador>`
-- `/anuncio <texto>`
+### Profissões e craft
+- `/profissao listar`
+- `/profissao escolher <nome>`
+- `/craftar listar`
+- `/craftar detalhes <id>`
+- `/craftar <id>`
+- `/subirprofissao`
 
----
+### Social e economia
+- `/jogadores`
+- `/encontrar`
+- `/duelar <id>`
+- `/aceitarduelo <id>`
+- `/trocar <id> <item> <qtd>`
+- `/mercado listar`
+- `/mercado vender <id_item> <qtd> <preco> [moeda]`
+- `/mercado comprar <id_listagem> [qtd]`
+- `/mercado minhas`
+- `/amigos`
+- `/adicionaramigo <id>`
+- `/inimigo <id>`
+- `/conversar <id> <mensagem>`
+- `/lerchat`
 
-## 🗃️ Estrutura do banco de dados (SQLite)
+## Execução
 
-O bot cria automaticamente um arquivo `database.db` com as seguintes tabelas principais:
+```bash
+npm install
+npm start
+```
 
-- `players` – dados dos personagens (atributos, reinos, moedas, avatar...)
-- `tecnicas` e `tecnicas_aprendidas` – técnicas disponíveis e progresso dos jogadores
-- `itens` e `inventario` – catálogo de itens e inventário de cada jogador
-- `seitas` e `seita_membros` – guildas e associações
-- `missoes_seita` e `missoes_pessoais` – missões de seitas e entre jogadores
-- `amigos_inimigos` – relacionamentos sociais
-- `mensagens_chat` – mensagens offline
-- `eventos_mundiais`, `loja_rpg`, `mercado_player`, `profissoes`, `npcs`, `changelog`
+No Windows, também dá para usar `start.bat`.
 
-O script `init.sql` contém toda a definição do schema.
+## Observações
 
----
-
-## 📁 Scripts auxiliares
-
-- `start.bat` – inicia o bot no Windows (duplo clique).
-- `backup.bat` – faz uma cópia do banco de dados com timestamp.
-
----
-
-## 🤝 Contribuição
-
-Contribuições são bem‑vindas! Sinta‑se à vontade para abrir **issues** ou **pull requests** com melhorias, correções de bugs ou novas funcionalidades.
-
-1. Faça um fork do projeto.
-2. Crie uma branch para sua feature (`git checkout -b feature/nova-coisa`).
-3. Commit suas alterações (`git commit -m 'Adiciona nova coisa'`).
-4. Push para a branch (`git push origin feature/nova-coisa`).
-5. Abra um Pull Request.
-
----
-
-## 📄 Licença
-
-Este projeto está sob a licença MIT – veja o arquivo [LICENSE](LICENSE) para detalhes.
-
----
-
-## 🙏 Agradecimentos
-
-- [whatsapp-web.js](https://github.com/pedroslopez/whatsapp-web.js) pela incrível biblioteca.
-- Comunidade de jogadores de Wuxia/Xianxia que inspiraram este projeto.
-
----
-
-## 📞 Contato
-
-Desenvolvido por [Soulkai] – [5567981445060]  
-
----
-
-⚡ *"A jornada para a imortalidade começa com um único comando."*
-
+- O bot continua usando `bot.js` como arquivo principal.
+- O banco é SQLite (`database.db`).
+- A inicialização agora aplica migrações automáticas para tabelas e colunas da V2.

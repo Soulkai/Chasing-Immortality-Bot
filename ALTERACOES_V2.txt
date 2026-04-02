@@ -1,0 +1,24 @@
+V2 FOCADA EM GAMEPLAY
+=====================
+
+Principais mudanças:
+- /romper agora executa tribulação real para físico e espiritual
+- /perfil redesenhado com barras de HP, Qi, Alma e Fadiga
+- sistema de equipamentos com bônus reais
+- novos comandos: /equipamentos, /equipar, /desequipar
+- craft reformulado com receitas, ingredientes, chance de falha e qualidade
+- novas profissões integradas ao craft
+- bosses por região com mérito e drops raros
+- NPCs com quests aceitáveis e entregáveis
+- novo comando /missoesnpc
+- exploração com evento imediato e materiais úteis para craft
+- domínios ajustados e integrados ao fluxo de batalha
+- processador de comandos atualizado
+- client.initialize restaurado via bootstrap da V2
+- migrações automáticas de schema e índices para banco existente
+
+Arquivos alterados:
+- bot.js
+- init.sql
+- package.json
+- README.md
