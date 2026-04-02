@@ -503,6 +503,123 @@ async function cmdPerfil(_args, message, telefone) {
     }
 }
 
+// ========================
+// COMANDOS DE VIAGEM
+// ========================
+async function cmdViajarCidade(args, message, telefone) {
+    const player = await ensurePlayerExists(telefone, message);
+    if (!player) return;
+    if (!args.length) {
+        db.all(`SELECT nome, nivel_minimo FROM locais_mae WHERE tipo = 'cidade' ORDER BY nivel_minimo`, (err, rows) => {
+            if (err || !rows.length) return sendReply(message, 'Nenhuma cidade disponível.');
+            let lista = '🏙️ *Cidades disponíveis:*\n';
+            rows.forEach(r => lista += `- ${r.nome} (mínimo nível ${r.nivel_minimo})\n`);
+            lista += '\nUse `/viajarcidade <nome>` para viajar.';
+            sendReply(message, lista);
+        });
+        return;
+    }
+    const nomeCidade = args.join(' ');
+    db.get(`SELECT * FROM locais_mae WHERE LOWER(nome) = LOWER(?) AND tipo = 'cidade'`, [nomeCidade], async (err, cidade) => {
+        if (err || !cidade) return sendReply(message, `Cidade "${nomeCidade}" não encontrada.`);
+        if (player.nivel_fisico < cidade.nivel_minimo) {
+            return sendReply(message, `Seu nível (${player.nivel_fisico}) é muito baixo para ${cidade.nome} (mínimo ${cidade.nivel_minimo}).`);
+        }
+        await updatePlayer(player.id, 'localizacao', cidade.nome);
+        sendReply(message, `✨ Você viajou para *${cidade.nome}*. ${cidade.descricao}\nUse /regioes para explorar as regiões próximas.`);
+    });
+}
+
+async function cmdViajarReino(args, message, telefone) {
+    const player = await ensurePlayerExists(telefone, message);
+    if (!player) return;
+    if (!args.length) {
+        db.all(`SELECT nome, nivel_minimo FROM locais_mae WHERE tipo = 'reino' ORDER BY nivel_minimo`, (err, rows) => {
+            if (err || !rows.length) return sendReply(message, 'Nenhum reino disponível.');
+            let lista = '🏰 *Reinos disponíveis:*\n';
+            rows.forEach(r => lista += `- ${r.nome} (mínimo nível ${r.nivel_minimo})\n`);
+            lista += '\nUse `/viajarreino <nome>` para viajar.';
+            sendReply(message, lista);
+        });
+        return;
+    }
+    const nomeReino = args.join(' ');
+    db.get(`SELECT * FROM locais_mae WHERE LOWER(nome) = LOWER(?) AND tipo = 'reino'`, [nomeReino], async (err, reino) => {
+        if (err || !reino) return sendReply(message, `Reino "${nomeReino}" não encontrado.`);
+        if (player.nivel_fisico < reino.nivel_minimo) {
+            return sendReply(message, `Seu nível (${player.nivel_fisico}) é muito baixo para ${reino.nome} (mínimo ${reino.nivel_minimo}).`);
+        }
+        await updatePlayer(player.id, 'localizacao', reino.nome);
+        sendReply(message, `✨ Você viajou para *${reino.nome}*. ${reino.descricao}\nUse /regioes para explorar.`);
+    });
+}
+
+async function cmdViajarImperio(args, message, telefone) {
+    const player = await ensurePlayerExists(telefone, message);
+    if (!player) return;
+    if (!args.length) {
+        db.all(`SELECT nome, nivel_minimo FROM locais_mae WHERE tipo = 'imperio' ORDER BY nivel_minimo`, (err, rows) => {
+            if (err || !rows.length) return sendReply(message, 'Nenhum império disponível.');
+            let lista = '🏛️ *Impérios disponíveis:*\n';
+            rows.forEach(r => lista += `- ${r.nome} (mínimo nível ${r.nivel_minimo})\n`);
+            lista += '\nUse `/viajarimperio <nome>` para viajar.';
+            sendReply(message, lista);
+        });
+        return;
+    }
+    const nomeImperio = args.join(' ');
+    db.get(`SELECT * FROM locais_mae WHERE LOWER(nome) = LOWER(?) AND tipo = 'imperio'`, [nomeImperio], async (err, imperio) => {
+        if (err || !imperio) return sendReply(message, `Império "${nomeImperio}" não encontrado.`);
+        if (player.nivel_fisico < imperio.nivel_minimo) {
+            return sendReply(message, `Seu nível (${player.nivel_fisico}) é muito baixo para ${imperio.nome} (mínimo ${imperio.nivel_minimo}).`);
+        }
+        await updatePlayer(player.id, 'localizacao', imperio.nome);
+        sendReply(message, `✨ Você viajou para *${imperio.nome}*. ${imperio.descricao}\nUse /regioes para explorar.`);
+    });
+}
+
+// Adicione esses comandos ao objeto 'commands' no processCommand:
+// viajarcidade: cmdViajarCidade,
+// viajarreino: cmdViajarReino,
+// viajarimperio: cmdViajarImperio,
+async function cmdRegioes(args, message, telefone) {
+    const player = await ensurePlayerExists(telefone, message);
+    if (!player) return;
+
+    // Se passou um nome de região como argumento, mostra detalhes
+    if (args.length > 0) {
+        const nomeRegiao = args.join(' ').toLowerCase();
+        db.get(`SELECT * FROM regioes WHERE LOWER(nome) = ?`, [nomeRegiao], (err, regiao) => {
+            if (err || !regiao) {
+                sendReply(message, `Região "${args.join(' ')}" não encontrada. Use /regioes para listar todas.`);
+                return;
+            }
+            let detalhes = `🏞️ *${regiao.nome}*\n`;
+            detalhes += `📖 ${regiao.descricao}\n`;
+            detalhes += `🎯 Nível recomendado: ${regiao.nivel_minimo} - ${regiao.nivel_maximo}\n`;
+            detalhes += `⚠️ Perigo: ${regiao.perigo.toUpperCase()}\n`;
+            detalhes += `💰 Recompensa base: ${regiao.recompensa_base} ouro\n`;
+            if (regiao.localizacao_pai) detalhes += `🗺️ Localização: ${regiao.localizacao_pai}\n`;
+            sendReply(message, detalhes);
+        });
+        return;
+    }
+
+    // Lista todas as regiões
+    db.all(`SELECT nome, nivel_minimo, nivel_maximo, perigo FROM regioes ORDER BY nivel_minimo ASC`, (err, rows) => {
+        if (err || !rows.length) {
+            sendReply(message, 'Nenhuma região cadastrada ainda.');
+            return;
+        }
+        let lista = `🗺️ *REGIÕES DISPONÍVEIS*\n\n`;
+        rows.forEach(r => {
+            lista += `📍 *${r.nome}* (nível ${r.nivel_minimo}-${r.nivel_maximo}) - Perigo: ${r.perigo}\n`;
+        });
+        lista += `\nUse /regioes <nome> para ver detalhes de uma região.`;
+        sendReply(message, lista);
+    });
+}
+
 async function cmdMudarAparencia(args, message, telefone) {
     const player = await ensurePlayerExists(telefone, message);
     if (!player) return;
@@ -2362,6 +2479,9 @@ async function processCommand(message) {
             status: cmdPerfil,
             atributos: cmdPerfil,
             romper: cmdRomper,
+            regioes: cmdRegioes,
+            viajarcidade: cmdViajarCidade,
+            viajarregiao: cmdViajarRegiao,
             jogadores: cmdJogadores,
             encontrar: cmdEncontrar,
             trocar: cmdTrocar,
