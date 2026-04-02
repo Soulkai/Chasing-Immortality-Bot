@@ -1,0 +1,38 @@
+[2026-04-02T08:22:10.087Z] [INFO] QR Code gerado. Escaneie com o WhatsApp.
+[2026-04-02T08:22:37.392Z] [SUCESSO] Bot conectado com sucesso!
+[2026-04-02T08:22:48.385Z] [RECV] Comando de 5521997537769: /menu
+[2026-04-02T08:23:00.716Z] [RECV] Comando de 209951507148985@lid: /menu
+[2026-04-02T08:23:25.977Z] [RECV] Comando de 209951507148985@lid: /Changelog
+[2026-04-02T08:23:42.093Z] [RECV] Comando de 209951507148985@lid: /perfil
+[2026-04-02T08:23:48.532Z] [RECV] Comando de 209951507148985@lid: /registrar ZhaoYufei F
+[2026-04-02T08:24:52.204Z] [RECV] Comando de 209951507148985@lid: /perfil
+[2026-04-02T08:25:20.289Z] [RECV] Comando de 209951507148985@lid: /mudaraparencia https://i.ibb.co/KxZN7kJg/IMG-20260331-WA0059.jpg
+[2026-04-02T08:25:25.002Z] [RECV] Comando de 209951507148985@lid: /perfil
+[2026-04-02T08:25:33.876Z] [RECV] Comando de 209951507148985@lid: /status
+[2026-04-02T08:25:48.000Z] [RECV] Comando de 209951507148985@lid: /menu
+[2026-04-02T08:25:51.196Z] [RECV] Comando de 209951507148985@lid: /ajuda
+[2026-04-02T08:25:56.014Z] [RECV] Comando de 209951507148985@lid: /guia
+[2026-04-02T08:26:03.021Z] [RECV] Comando de 209951507148985@lid: /cultivo
+[2026-04-02T08:26:09.872Z] [RECV] Comando de 209951507148985@lid: /guia cultivo
+[2026-04-02T08:26:31.187Z] [RECV] Comando de 209951507148985@lid: /guia batalha
+[2026-04-02T08:26:50.036Z] [RECV] Comando de 209951507148985@lid: /guia profissão
+[2026-04-02T08:26:56.108Z] [RECV] Comando de 209951507148985@lid: /guia profissao
+[2026-04-02T08:27:14.122Z] [RECV] Comando de 209951507148985@lid: /guia social
+[2026-04-02T08:27:35.463Z] [RECV] Comando de 209951507148985@lid: /tecnicas
+[2026-04-02T08:27:42.600Z] [SUCESSO] Bot conectado com sucesso!
+[2026-04-02T08:27:47.403Z] [RECV] Comando de 209951507148985@lid: /loja
+[2026-04-02T08:28:56.407Z] [RECV] Comando de 209951507148985@lid: /ajuda andar
+[2026-04-02T08:29:02.224Z] [RECV] Comando de 209951507148985@lid: /regiao
+[2026-04-02T08:29:28.915Z] [RECV] Comando de 209951507148985@lid: /ranking
+[2026-04-02T08:29:35.664Z] [RECV] Comando de 209951507148985@lid: /dominio
+[2026-04-02T08:29:54.193Z] [RECV] Comando de 209951507148985@lid: /dominino entrar Caverna dos Espíritos
+[2026-04-02T08:30:04.059Z] [RECV] Comando de 209951507148985@lid: /dominio entrar Caverna dos Espíritos
+[2026-04-02T08:30:16.450Z] [RECV] Comando de 209951507148985@lid: /dominio continuar
+[2026-04-02T08:30:26.300Z] [RECV] Comando de 209951507148985@lid: /dominio entrar Caverna dos Espíritos
+[2026-04-02T08:30:31.148Z] [RECV] Comando de 209951507148985@lid: /dominio continuar
+[2026-04-02T08:31:38.365Z] [RECV] Comando de 209951507148985@lid: /andar
+[2026-04-02T08:49:56.244Z] [RECV] Comando de 209951507148985@lid: /atacar
+[2026-04-02T08:50:09.763Z] [RECV] Comando de 209951507148985@lid: /atacar
+[2026-04-02T08:50:20.606Z] [RECV] Comando de 209951507148985@lid: /atacar
+[2026-04-02T08:50:24.137Z] [RECV] Comando de 209951507148985@lid: /atacar
+[2026-04-02T08:51:43.297Z] [INFO] Encerrando bot (SIGINT)...

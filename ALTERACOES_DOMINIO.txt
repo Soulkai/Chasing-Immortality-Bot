@@ -1,0 +1,19 @@
+Correções aplicadas nesta revisão:
+
+1. Corrigido o bug de /dominio continuar
+- Em bot.js havia um SELECT usando a coluna errada: d.item_raru_id
+- O nome correto no banco é: d.item_raro_id
+- Isso fazia a consulta falhar e o bot responder que o jogador não estava em domínio.
+
+2. Melhorado o fluxo de /dominio entrar
+- Agora o bot verifica qualquer instância existente do domínio.
+- Se a instância anterior estiver concluída, ele reinicia o domínio em vez de falhar no INSERT por chave primária duplicada.
+
+3. Proteção extra em /dominio continuar
+- Se o jogador já estiver em combate dentro do domínio, o bot avisa em vez de criar outro combate por cima.
+
+4. Log melhorado
+- Erros reais do carregamento/reinício de domínio agora entram no log com mais clareza.
+
+Validação executada:
+- node --check bot.js

@@ -1927,14 +1927,27 @@ async function cmdDominio(args, message, telefone) {
                 return;
             }
 
-            db.get(`SELECT * FROM dominio_instancias WHERE player_id = ? AND dominio_id = ? AND status = 'em_andamento'`, [player.id, dominio.id], (_err2, instancia) => {
-                if (instancia) {
+            db.get(`SELECT * FROM dominio_instancias WHERE player_id = ? AND dominio_id = ?`, [player.id, dominio.id], (_err2, instancia) => {
+                if (instancia && instancia.status === 'em_andamento') {
                     sendReply(message, `Você já está explorando ${dominio.nome} (andar ${instancia.andar_atual}/${dominio.andares}). Continue com /dominio continuar.`);
+                    return;
+                }
+
+                if (instancia) {
+                    db.run(`UPDATE dominio_instancias SET andar_atual = 1, status = 'em_andamento', data_inicio = CURRENT_TIMESTAMP WHERE player_id = ? AND dominio_id = ?`, [player.id, dominio.id], async (err3) => {
+                        if (err3) {
+                            log(`Erro ao reiniciar domínio ${dominio.nome}: ${err3?.message || err3}`, 'ERRO');
+                            await sendReply(message, 'Erro ao reiniciar o domínio.');
+                            return;
+                        }
+                        await sendReply(message, `🌟 Você entrou no domínio *${dominio.nome}*. Andar 1/${dominio.andares}. Use /dominio continuar para avançar.`);
+                    });
                     return;
                 }
 
                 db.run(`INSERT INTO dominio_instancias (player_id, dominio_id, andar_atual, status) VALUES (?, ?, 1, 'em_andamento')`, [player.id, dominio.id], async (err3) => {
                     if (err3) {
+                        log(`Erro ao criar instância de domínio ${dominio.nome}: ${err3?.message || err3}`, 'ERRO');
                         await sendReply(message, 'Erro ao entrar no domínio.');
                         return;
                     }
@@ -1946,14 +1959,26 @@ async function cmdDominio(args, message, telefone) {
     }
 
     if (subcmd === 'continuar') {
+        const batalhaAtual = batalhasAtivas.get(player.id);
+        if (batalhaAtual && batalhaAtual.tipo === 'dominio') {
+            await sendReply(message, 'Você já está em combate dentro do domínio. Use /atacar, /defender, /usaritem, /usartecnica ou /fugir.');
+            return;
+        }
+
         db.get(
-            `SELECT di.*, d.nome, d.andares, d.recompensa_base_ouro, d.item_raru_id 
+            `SELECT di.*, d.nome, d.andares, d.recompensa_base_ouro, d.item_raro_id 
              FROM dominio_instancias di 
              JOIN dominios d ON di.dominio_id = d.id 
              WHERE di.player_id = ? AND di.status = 'em_andamento'`,
             [player.id],
             async (err, instancia) => {
-                if (err || !instancia) {
+                if (err) {
+                    log(`Erro ao continuar domínio: ${err?.message || err}`, 'ERRO');
+                    await sendReply(message, 'Erro ao carregar o domínio atual.');
+                    return;
+                }
+
+                if (!instancia) {
                     await sendReply(message, 'Você não está em nenhum domínio no momento. Use `/dominio entrar <nome>` para começar.');
                     return;
                 }
@@ -1963,7 +1988,9 @@ async function cmdDominio(args, message, telefone) {
                 const nome = instancia.nome;
                 const inimigo = gerarInimigoDominio(andarAtual, totalAndares);
 
-                await sendReply(message, `🏯 *${nome} - Andar ${andarAtual}/${totalAndares}*\n⚔️ Você encontra: *${inimigo.nome}* (HP: ${inimigo.hp})\nUse /atacar, /defender, /usaritem, /usartecnica.`);
+                await sendReply(message, `🏯 *${nome} - Andar ${andarAtual}/${totalAndares}*
+⚔️ Você encontra: *${inimigo.nome}* (HP: ${inimigo.hp})
+Use /atacar, /defender, /usaritem, /usartecnica.`);
 
                 batalhasAtivas.set(player.id, {
                     tipo: 'dominio',
