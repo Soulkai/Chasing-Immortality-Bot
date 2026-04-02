@@ -221,6 +221,13 @@ CREATE TABLE IF NOT EXISTS changelog (
     texto TEXT
 );
 
+CREATE TABLE IF NOT EXISTS biblioteca_seita (
+    seita_id INTEGER,
+    tecnica_id INTEGER,
+    FOREIGN KEY(seita_id) REFERENCES seitas(id),
+    FOREIGN KEY(tecnica_id) REFERENCES tecnicas(id)
+);
+
 -- Inserir algumas técnicas iniciais
 INSERT OR IGNORE INTO tecnicas (nome, tipo, elementos, descricao, poder_base, custo_qi, efeito) VALUES
 ('Meditação da Respiração Primordial', 'Meditacao', 'Água', 'Técnica básica de meditação para cultivar Qi.', 0, 0, 'permite_cultivar'),
