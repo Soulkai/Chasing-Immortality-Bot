@@ -1,5 +1,5 @@
 // ============================================
-// CHASING IMMORTALITY BOT - CÓDIGO COMPLETO
+// CHASING IMMORTALITY BOT - CÓDIGO COMPLETO (CORRIGIDO)
 // ============================================
 
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
@@ -69,12 +69,11 @@ function updatePlayer(playerId, campo, valor) {
 async function ensurePlayerExists(telefone, message) {
     const player = await getPlayer(telefone);
     if (!player) {
-        await message.reply('❌ Você não está registrado! Use `/registrar <nome> <sexo>` para começar.');
+        await client.sendMessage(message.from, '❌ Você não está registrado! Use `/registrar <nome> <sexo>` para começar.');
         return null;
     }
     return player;
 }
-
 
 function getPlayerById(id) {
     return new Promise((resolve, reject) => {
@@ -87,6 +86,20 @@ function getPlayerByUniqueId(uniqueId) {
         db.get('SELECT * FROM players WHERE unique_id = ?', [uniqueId], (err, row) => resolve(row));
     });
 }
+
+// ========== FUNÇÃO AUXILIAR PARA ENVIAR RESPOSTAS (SUBSTITUI message.reply) ==========
+async function sendReply(message, text, media = null) {
+    try {
+        if (media) {
+            await client.sendMessage(message.from, media, { caption: text });
+        } else {
+            await client.sendMessage(message.from, text);
+        }
+    } catch (err) {
+        log(`Erro ao enviar mensagem: ${err}`, 'ERRO');
+    }
+}
+
 // ========== CLIENTE WHATSAPP ==========
 const client = new Client({
     authStrategy: new LocalAuth(),
@@ -101,33 +114,28 @@ client.on('qr', qr => {
 client.on('ready', () => log('Bot conectado com sucesso!', 'SUCESSO'));
 
 client.on('message', async message => {
-    // 🔧 CORREÇÃO: Garante que message.reply exista (especialmente em grupos)
-    if (!message.reply) {
-        message.reply = async (text) => {
-            await client.sendMessage(message.from, text);
-        };
-    }
-
     if (message.body.startsWith(COMMAND_PREFIX)) {
         log(`Comando de ${message.from}: ${message.body}`, 'RECV');
         await processCommand(message);
     }
 });
 
+// ========== COMANDOS (todos usando sendReply) ==========
+
 async function cmdRegistrar(args, message, telefone) {
     if (args.length < 2) {
-        message.reply('Uso: `/registrar <nome> <sexo>` (sexo M/F)');
+        sendReply(message, 'Uso: `/registrar <nome> <sexo>` (sexo M/F)');
         return;
     }
     const nome = args[0];
     let sexo = args[1].toUpperCase();
     if (sexo !== 'M' && sexo !== 'F') {
-        message.reply('Sexo deve ser M ou F.');
+        sendReply(message, 'Sexo deve ser M ou F.');
         return;
     }
     const existing = await getPlayer(telefone);
     if (existing) {
-        message.reply('Você já está registrado! Use `/perfil`.');
+        sendReply(message, 'Você já está registrado! Use `/perfil`.');
         return;
     }
 
@@ -173,9 +181,9 @@ async function cmdRegistrar(args, message, telefone) {
     stmt.run(unique_id, nome, sexo, racaEscolhida, clanEscolhido, raiz, elementos, corpoDivino, orfao, 'Neutro', 0, 0, fortuna,
         qi_max, qi_max, hp_max, hp_max, forca, vigor, defesa, inteligencia, espirito, agilidade,
         100, '', '', 0, 100, localizacao, telefone, (err) => {
-            if (err) { log(`Erro registro: ${err}`, 'ERRO'); message.reply('Erro interno. Tente novamente.'); }
+            if (err) { log(`Erro registro: ${err}`, 'ERRO'); sendReply(message, 'Erro interno. Tente novamente.'); }
             else {
-                message.reply(`🌟 *Bem-vindo ao Chasing Immortality, ${nome}!*\n\n📜 *ID:* ${unique_id}\n🧬 *Raça:* ${racaEscolhida}\n🏮 *Clã:* ${clanEscolhido}\n🌿 *Raiz:* ${raiz} (${elementos})\n💪 *Corpo Divino:* ${corpoDivino || 'Nenhum'}\n❤️ *Órfão:* ${orfao ? 'Sim' : 'Não'}\n\nUse /perfil para ver detalhes. Boa sorte!`);
+                sendReply(message, `🌟 *Bem-vindo ao Chasing Immortality, ${nome}!*\n\n📜 *ID:* ${unique_id}\n🧬 *Raça:* ${racaEscolhida}\n🏮 *Clã:* ${clanEscolhido}\n🌿 *Raiz:* ${raiz} (${elementos})\n💪 *Corpo Divino:* ${corpoDivino || 'Nenhum'}\n❤️ *Órfão:* ${orfao ? 'Sim' : 'Não'}\n\nUse /perfil para ver detalhes. Boa sorte!`);
             }
         });
     stmt.finalize();
@@ -188,21 +196,22 @@ async function cmdPerfil(args, message, telefone) {
     if (player.avatar_url) {
         try {
             const media = await MessageMedia.fromUrl(player.avatar_url, { unsafe: true });
-            await message.reply(media, undefined, { caption: texto });
-        } catch(e) { await message.reply(texto + '\n⚠️ Erro ao carregar avatar.'); }
-    } else await message.reply(texto);
+            await sendReply(message, texto, media);
+        } catch(e) { await sendReply(message, texto + '\n⚠️ Erro ao carregar avatar.'); }
+    } else await sendReply(message, texto);
 }
 
 async function cmdMudarAparencia(args, message, telefone) {
     const player = await ensurePlayerExists(telefone, message);
     if (!player) return;
     if (!args[0] || !args[0].match(/\.(jpg|jpeg|png|gif|webp)/i)) {
-        message.reply('Uso: `/mudaraparencia <URL_da_imagem>` (jpg, png, gif, webp)');
+        sendReply(message, 'Uso: `/mudaraparencia <URL_da_imagem>` (jpg, png, gif, webp)');
         return;
     }
     await updatePlayer(player.id, 'avatar_url', args[0]);
-    message.reply('🧝 Avatar atualizado! Aparecerá no /perfil.');
+    sendReply(message, '🧝 Avatar atualizado! Aparecerá no /perfil.');
 }
+
 function cmdMenu(message) {
     const agora = new Date();
     const dataStr = agora.toLocaleDateString('pt-BR');
@@ -328,13 +337,12 @@ function cmdMenu(message) {
     menu += `▢\n`;
     menu += `╰━━─「🎮」─━━`;
     
-    message.reply(menu);
+    sendReply(message, menu);
 }
 
-// ========== GUIAS E ATALHOS ==========
 async function cmdGuia(args, message) {
     if (!args.length) {
-        message.reply(`📖 *Guias disponíveis:*\n/guia cultivo\n/guia batalha\n/guia profissao\n/guia social\n\nUse /guia <assunto> para detalhes.`);
+        sendReply(message, `📖 *Guias disponíveis:*\n/guia cultivo\n/guia batalha\n/guia profissao\n/guia social\n\nUse /guia <assunto> para detalhes.`);
         return;
     }
     const assunto = args[0].toLowerCase();
@@ -355,40 +363,40 @@ async function cmdGuia(args, message) {
         default:
             texto = `Assunto não encontrado. Use /guia sem argumentos para ver a lista.`;
     }
-    message.reply(texto);
+    sendReply(message, texto);
 }
 
 async function cmdRomper(args, message, telefone) {
     const player = await ensurePlayerExists(telefone, message);
     if (!player) return;
     if (player.sub_fisico === 9 || player.sub_espiritual === 9) {
-        message.reply(`⚡ O céu escurece... Você sente a Tribulação do Céu se aproximar!\nContinue cultivando para enfrentar o desafio e avançar de reino.`);
+        sendReply(message, `⚡ O céu escurece... Você sente a Tribulação do Céu se aproximar!\nContinue cultivando para enfrentar o desafio e avançar de reino.`);
     } else {
-        message.reply(`Você ainda não atingiu o pico do seu reino atual. Continue cultivando para chegar ao subnível 9.`);
+        sendReply(message, `Você ainda não atingiu o pico do seu reino atual. Continue cultivando para chegar ao subnível 9.`);
     }
 }
 
 async function cmdJogadores(args, message, telefone) {
-    message.reply(`👥 *Jogadores próximos*\nFuncionalidade em desenvolvimento. Use /ranking para ver a lista geral.`);
+    sendReply(message, `👥 *Jogadores próximos*\nFuncionalidade em desenvolvimento. Use /ranking para ver a lista geral.`);
 }
 async function cmdEncontrar(args, message, telefone) {
-    message.reply(`🔍 *Encontrar jogadores*\nUse /andar em uma região e aguarde eventos. Quando outro jogador também estiver explorando, vocês poderão se encontrar.`);
+    sendReply(message, `🔍 *Encontrar jogadores*\nUse /andar em uma região e aguarde eventos. Quando outro jogador também estiver explorando, vocês poderão se encontrar.`);
 }
 async function cmdTrocar(args, message, telefone) {
-    message.reply(`🔄 *Troca de itens*\nEm breve! Por enquanto, use /loja para comprar/vender.`);
+    sendReply(message, `🔄 *Troca de itens*\nEm breve! Por enquanto, use /loja para comprar/vender.`);
 }
 async function cmdDuelar(args, message, telefone) {
-    message.reply(`⚔️ *Duelo PvP*\nPara duelar, ambos devem estar na mesma região e se encontrar via /andar. Em desenvolvimento.`);
+    sendReply(message, `⚔️ *Duelo PvP*\nPara duelar, ambos devem estar na mesma região e se encontrar via /andar. Em desenvolvimento.`);
 }
 async function cmdMercadoGlobal(args, message, telefone) {
-    message.reply(`🏪 *Mercado Global*\nEm desenvolvimento. Use /loja para comprar itens básicos.`);
+    sendReply(message, `🏪 *Mercado Global*\nEm desenvolvimento. Use /loja para comprar itens básicos.`);
 }
 async function cmdNPCInteragir(args, message, telefone) {
-    message.reply(`👤 Para interagir com NPCs, use /andar e aguarde os eventos. Quando um NPC aparecer, siga as opções numeradas com /escolha <número>.`);
+    sendReply(message, `👤 Para interagir com NPCs, use /andar e aguarde os eventos. Quando um NPC aparecer, siga as opções numeradas com /escolha <número>.`);
 }
 
 function cmdAjuda(args, message) {
-    if (!args[0]) { message.reply('Use `/ajuda <comando>`. Ex: `/ajuda cultivar`'); return; }
+    if (!args[0]) { sendReply(message, 'Use `/ajuda <comando>`. Ex: `/ajuda cultivar`'); return; }
     const ajuda = {
         'cultivar': 'Treina cultivo físico ou espiritual. Requer técnica de meditação. Sintaxe: `/cultivar [fisico|espiritual]`',
         'registrar': 'Registra personagem. Sintaxe: `/registrar <nome> <sexo>`',
@@ -397,7 +405,7 @@ function cmdAjuda(args, message) {
         'andar': 'Explora a região atual. Pode encontrar monstros, NPCs ou outros jogadores.',
         'combate': 'Comandos de batalha: /atacar, /defender, /usaritem, /fugir, /usartecnica'
     };
-    message.reply(ajuda[args[0].toLowerCase()] || 'Comando não encontrado.');
+    sendReply(message, ajuda[args[0].toLowerCase()] || 'Comando não encontrado.');
 }
 
 async function cmdDescansar(args, message, telefone) {
@@ -407,44 +415,16 @@ async function cmdDescansar(args, message, telefone) {
     const novoQi = Math.min(player.qi_maximo, player.qi_atual + 30);
     await updatePlayer(player.id, 'fadiga', novaFadiga);
     await updatePlayer(player.id, 'qi_atual', novoQi);
-    message.reply(`😴 Você descansou. Fadiga: ${player.fadiga} → ${novaFadiga} | Qi: ${player.qi_atual} → ${novoQi}`);
+    sendReply(message, `😴 Você descansou. Fadiga: ${player.fadiga} → ${novaFadiga} | Qi: ${player.qi_atual} → ${novoQi}`);
 }
 
 async function cmdChangelog(message) {
     db.all('SELECT * FROM changelog ORDER BY data DESC LIMIT 5', (err, rows) => {
-        if (err) return message.reply('Erro ao buscar changelog.');
+        if (err) return sendReply(message, 'Erro ao buscar changelog.');
         let text = '📜 *CHANGELOG*\n';
         rows.forEach(r => { text += `\n*${r.versao}* (${r.data}): ${r.texto}`; });
-        message.reply(text);
+        sendReply(message, text);
     });
-}
-
-async function cmdRomper(args, message, telefone) {
-    const player = await ensurePlayerExists(telefone, message);
-    if (!player) return;
-    // Verifica se está no subnível 9 de algum dos cultivos
-    if (player.sub_fisico === 9 || player.sub_espiritual === 9) {
-        message.reply(`⚡ O céu escurece... Você sente a Tribulação do Céu se aproximar!\nPara avançar de reino, você precisa enfrentar um desafio. Use /cultivar novamente para iniciar a tribulação.`);
-        // Aqui poderia iniciar uma batalha especial, mas por enquanto apenas avisa
-    } else {
-        message.reply(`Você ainda não atingiu o pico do seu reino atual. Continue cultivando para chegar ao subnível 9.`);
-    }
-}
-
-async function cmdJogadores(args, message, telefone) {
-    message.reply(`👥 *Jogadores próximos*\nFuncionalidade em desenvolvimento. Use /ranking para ver a lista geral.`);
-}
-async function cmdEncontrar(args, message, telefone) {
-    message.reply(`🔍 *Encontrar jogadores*\nUse /andar em uma região e aguarde eventos. Quando outro jogador também estiver explorando, vocês poderão se encontrar.`);
-}
-async function cmdTrocar(args, message, telefone) {
-    message.reply(`🔄 *Troca de itens*\nEm breve! Por enquanto, use /mercado para vender/comprar itens.`);
-}
-async function cmdDuelar(args, message, telefone) {
-    message.reply(`⚔️ *Duelo PvP*\nPara duelar, ambos os jogadores devem estar na mesma região e usar /batalhar quando se encontrarem. Em desenvolvimento.`);
-}
-async function cmdMercadoGlobal(args, message, telefone) {
-    message.reply(`🏪 *Mercado Global*\nEm desenvolvimento. Use /loja para comprar itens básicos.`);
 }
 
 async function cmdCultivar(args, message, telefone) {
@@ -452,23 +432,22 @@ async function cmdCultivar(args, message, telefone) {
     if (!player) return;
     const tipo = args[0]?.toLowerCase();
     if (tipo !== 'fisico' && tipo !== 'espiritual') {
-        message.reply('Especifique `/cultivar fisico` ou `/cultivar espiritual`.');
+        sendReply(message, 'Especifique `/cultivar fisico` ou `/cultivar espiritual`.');
         return;
     }
-    // Verifica técnica de meditação
     const tecnica = await new Promise(resolve => {
         db.get(`SELECT * FROM tecnicas_aprendidas ta JOIN tecnicas t ON ta.tecnica_id = t.id WHERE ta.player_id = ? AND t.tipo = 'Meditacao' AND ta.aprendida = 1`, [player.id], (err, row) => resolve(row));
     });
     if (!tecnica) {
-        message.reply('Você não possui uma técnica de meditação. Adquira uma primeiro!');
+        sendReply(message, 'Você não possui uma técnica de meditação. Adquira uma primeiro!');
         return;
     }
     if (player.fadiga < 20) {
-        message.reply('Você está muito cansado. Descanse (`/descansar`).');
+        sendReply(message, 'Você está muito cansado. Descanse (`/descansar`).');
         return;
     }
     if (player.qi_atual < 10) {
-        message.reply('Qi insuficiente. Recupere com pílulas ou descanse.');
+        sendReply(message, 'Qi insuficiente. Recupere com pílulas ou descanse.');
         return;
     }
     let ganho = rollDice(20) + (tipo === 'fisico' ? player.forca : player.inteligencia);
@@ -479,7 +458,6 @@ async function cmdCultivar(args, message, telefone) {
     let novaFadiga = player.fadiga - custoFadiga;
     await updatePlayer(player.id, 'qi_atual', novoQi);
     await updatePlayer(player.id, 'fadiga', novaFadiga);
-    // Progresso de subnível (simplificado)
     let campoSub = tipo === 'fisico' ? 'sub_fisico' : 'sub_espiritual';
     let subAtual = tipo === 'fisico' ? player.sub_fisico : player.sub_espiritual;
     let novoSub = subAtual;
@@ -487,24 +465,23 @@ async function cmdCultivar(args, message, telefone) {
         novoSub += Math.floor(ganho / 100);
         if (novoSub > 9) {
             novoSub = 1;
-            // Tribulação do céu (simplificada)
-            message.reply('⚡ Você sente a tribulação do céu se aproximar! Avançar de reino exigirá um desafio. (implementar depois)');
+            sendReply(message, '⚡ Você sente a tribulação do céu se aproximar! Avançar de reino exigirá um desafio. (implementar depois)');
         }
         ganho = ganho % 100;
     }
     await updatePlayer(player.id, campoSub, novoSub);
-    message.reply(`🧘 Você cultivou ${tipo} e ganhou ${ganho} de experiência. Qi: ${player.qi_atual}→${novoQi} | Fadiga: ${player.fadiga}→${novaFadiga}`);
+    sendReply(message, `🧘 Você cultivou ${tipo} e ganhou ${ganho} de experiência. Qi: ${player.qi_atual}→${novoQi} | Fadiga: ${player.fadiga}→${novaFadiga}`);
 }
 
 async function cmdTecnicas(args, message, telefone) {
     const player = await ensurePlayerExists(telefone, message);
     if (!player) return;
     db.all(`SELECT t.nome, t.tipo, ta.compreensao, ta.aprendida FROM tecnicas_aprendidas ta JOIN tecnicas t ON ta.tecnica_id = t.id WHERE ta.player_id = ?`, [player.id], (err, rows) => {
-        if (err || rows.length === 0) message.reply('Você não conhece nenhuma técnica ainda.');
+        if (err || rows.length === 0) sendReply(message, 'Você não conhece nenhuma técnica ainda.');
         else {
             let txt = '📜 *Suas Técnicas*\n';
             rows.forEach(r => txt += `\n${r.nome} (${r.tipo}) - Compreensão: ${r.compreensao}% - ${r.aprendida ? '✅ Aprendida' : '❌ Não aprendida'}`);
-            message.reply(txt);
+            sendReply(message, txt);
         }
     });
 }
@@ -512,35 +489,35 @@ async function cmdTecnicas(args, message, telefone) {
 async function cmdCompreender(args, message, telefone) {
     const player = await ensurePlayerExists(telefone, message);
     if (!player) return;
-    if (!args[0]) { message.reply('Uso: `/compreender <id_tecnica>`'); return; }
+    if (!args[0]) { sendReply(message, 'Uso: `/compreender <id_tecnica>`'); return; }
     const idTec = parseInt(args[0]);
     db.get(`SELECT * FROM tecnicas_aprendidas WHERE player_id = ? AND tecnica_id = ?`, [player.id, idTec], async (err, row) => {
-        if (err || !row) return message.reply('Você não possui essa técnica.');
-        if (row.aprendida) return message.reply('Você já aprendeu essa técnica completamente.');
+        if (err || !row) return sendReply(message, 'Você não possui essa técnica.');
+        if (row.aprendida) return sendReply(message, 'Você já aprendeu essa técnica completamente.');
         let ganho = rollDice(20) + Math.floor(player.inteligencia / 10) + Math.floor(player.espirito / 20);
         let novaComp = Math.min(100, row.compreensao + ganho);
         db.run(`UPDATE tecnicas_aprendidas SET compreensao = ? WHERE player_id = ? AND tecnica_id = ?`, [novaComp, player.id, idTec]);
-        message.reply(`📖 Você estudou a técnica e aumentou a compreensão para ${novaComp}%.`);
-        if (novaComp >= 100) message.reply('🎉 Você compreendeu completamente a técnica! Agora pode aprendê-la com `/aprender`.');
+        sendReply(message, `📖 Você estudou a técnica e aumentou a compreensão para ${novaComp}%.`);
+        if (novaComp >= 100) sendReply(message, '🎉 Você compreendeu completamente a técnica! Agora pode aprendê-la com `/aprender`.');
     });
 }
 
 async function cmdAprender(args, message, telefone) {
     const player = await ensurePlayerExists(telefone, message);
     if (!player) return;
-    if (!args[0]) { message.reply('Uso: `/aprender <id_tecnica>`'); return; }
+    if (!args[0]) { sendReply(message, 'Uso: `/aprender <id_tecnica>`'); return; }
     const idTec = parseInt(args[0]);
     db.get(`SELECT * FROM tecnicas_aprendidas WHERE player_id = ? AND tecnica_id = ?`, [player.id, idTec], async (err, row) => {
-        if (err || !row) return message.reply('Técnica não encontrada.');
-        if (row.aprendida) return message.reply('Você já aprendeu essa técnica.');
-        if (row.compreensao < 50) return message.reply('Você precisa de pelo menos 50% de compreensão para tentar aprender.');
+        if (err || !row) return sendReply(message, 'Técnica não encontrada.');
+        if (row.aprendida) return sendReply(message, 'Você já aprendeu essa técnica.');
+        if (row.compreensao < 50) return sendReply(message, 'Você precisa de pelo menos 50% de compreensão para tentar aprender.');
         let chance = 50 + Math.floor(player.inteligencia / 20);
         let sucesso = rollDice(100) <= chance;
         if (sucesso || row.compreensao === 100) {
             db.run(`UPDATE tecnicas_aprendidas SET aprendida = 1 WHERE player_id = ? AND tecnica_id = ?`, [player.id, idTec]);
-            message.reply('✅ Você aprendeu a técnica! Pode usá-la em combate com `/usartecnica`.');
+            sendReply(message, '✅ Você aprendeu a técnica! Pode usá-la em combate com `/usartecnica`.');
         } else {
-            message.reply('❌ Você falhou ao aprender. Só poderá tentar novamente com 100% de compreensão.');
+            sendReply(message, '❌ Você falhou ao aprender. Só poderá tentar novamente com 100% de compreensão.');
         }
     });
 }
@@ -549,11 +526,11 @@ async function cmdInventario(args, message, telefone) {
     const player = await ensurePlayerExists(telefone, message);
     if (!player) return;
     db.all(`SELECT i.nome, inv.quantidade, i.id FROM inventario inv JOIN itens i ON inv.item_id = i.id WHERE inv.player_id = ?`, [player.id], (err, rows) => {
-        if (err || rows.length === 0) message.reply('Seu inventário está vazio.');
+        if (err || rows.length === 0) sendReply(message, 'Seu inventário está vazio.');
         else {
             let txt = '🎒 *INVENTÁRIO*\n';
             rows.forEach(r => txt += `\n${r.nome} x${r.quantidade} (ID:${r.id})`);
-            message.reply(txt);
+            sendReply(message, txt);
         }
     });
 }
@@ -561,12 +538,11 @@ async function cmdInventario(args, message, telefone) {
 async function cmdUsarItem(args, message, telefone) {
     const player = await ensurePlayerExists(telefone, message);
     if (!player) return;
-    if (!args[0]) { message.reply('Uso: `/usar <id_item>`'); return; }
+    if (!args[0]) { sendReply(message, 'Uso: `/usar <id_item>`'); return; }
     const itemId = parseInt(args[0]);
     db.get(`SELECT inv.quantidade, i.* FROM inventario inv JOIN itens i ON inv.item_id = i.id WHERE inv.player_id = ? AND inv.item_id = ?`, [player.id, itemId], async (err, row) => {
-        if (err || !row) return message.reply('Item não encontrado.');
-        if (row.quantidade < 1) return message.reply('Você não possui esse item.');
-        // Aplica efeito
+        if (err || !row) return sendReply(message, 'Item não encontrado.');
+        if (row.quantidade < 1) return sendReply(message, 'Você não possui esse item.');
         let efeito = row.efeito;
         let resposta = '';
         if (efeito.includes('Qi')) {
@@ -580,11 +556,10 @@ async function cmdUsarItem(args, message, telefone) {
             await updatePlayer(player.id, 'hp_atual', novoHP);
             resposta = `Você usou ${row.nome} e recuperou ${valor} HP.`;
         } else if (efeito.includes('re-roll')) {
-            // re-roll raça/clã (simplificado)
             resposta = `Funcionalidade de re-roll ainda não implementada completamente.`;
         } else resposta = `Você usou ${row.nome}. Efeito: ${row.efeito}`;
         db.run(`UPDATE inventario SET quantidade = quantidade - 1 WHERE player_id = ? AND item_id = ?`, [player.id, itemId]);
-        message.reply(resposta);
+        sendReply(message, resposta);
     });
 }
 
@@ -594,7 +569,7 @@ async function cmdLoja(args, message, telefone) {
     if (args[0] === 'comprar' && args[1]) {
         const itemId = parseInt(args[1]);
         db.get(`SELECT l.*, i.nome, i.valor_compra FROM loja_rpg l JOIN itens i ON l.item_id = i.id WHERE i.id = ?`, [itemId], async (err, row) => {
-            if (err || !row) return message.reply('Item não encontrado na loja.');
+            if (err || !row) return sendReply(message, 'Item não encontrado na loja.');
             let preco = row.preco;
             let moeda = row.moeda_tipo;
             let saldo = player[moeda];
@@ -602,24 +577,24 @@ async function cmdLoja(args, message, telefone) {
                 let novoSaldo = saldo - preco;
                 await updatePlayer(player.id, moeda, novoSaldo);
                 db.run(`INSERT INTO inventario (player_id, item_id, quantidade) VALUES (?, ?, 1) ON CONFLICT(player_id, item_id) DO UPDATE SET quantidade = quantidade + 1`, [player.id, itemId]);
-                message.reply(`Você comprou ${row.nome} por ${preco} ${moeda}.`);
-            } else message.reply(`Moeda insuficiente. Você tem ${saldo} ${moeda}.`);
+                sendReply(message, `Você comprou ${row.nome} por ${preco} ${moeda}.`);
+            } else sendReply(message, `Moeda insuficiente. Você tem ${saldo} ${moeda}.`);
         });
     } else if (args[0] === 'vender' && args[1]) {
         const itemId = parseInt(args[1]);
         db.get(`SELECT inv.quantidade, i.* FROM inventario inv JOIN itens i ON inv.item_id = i.id WHERE inv.player_id = ? AND inv.item_id = ?`, [player.id, itemId], async (err, row) => {
-            if (err || !row || row.quantidade < 1) return message.reply('Item não encontrado.');
+            if (err || !row || row.quantidade < 1) return sendReply(message, 'Item não encontrado.');
             let valor = row.valor_venda;
             let novoOuro = player.ouro + valor;
             await updatePlayer(player.id, 'ouro', novoOuro);
             db.run(`UPDATE inventario SET quantidade = quantidade - 1 WHERE player_id = ? AND item_id = ?`, [player.id, itemId]);
-            message.reply(`Você vendeu ${row.nome} por ${valor} ouro.`);
+            sendReply(message, `Você vendeu ${row.nome} por ${valor} ouro.`);
         });
     } else {
         db.all(`SELECT i.id, i.nome, l.preco, l.moeda_tipo FROM loja_rpg l JOIN itens i ON l.item_id = i.id`, (err, rows) => {
             let txt = '🏪 *LOJA DO JOGO*\nCompre: /loja comprar <id>\nVenda: /loja vender <id>\n\n';
             rows.forEach(r => txt += `${r.id} - ${r.nome} - ${r.preco} ${r.moeda_tipo}\n`);
-            message.reply(txt);
+            sendReply(message, txt);
         });
     }
 }
@@ -627,28 +602,28 @@ async function cmdLoja(args, message, telefone) {
 // ========================
 // SISTEMA DE EXPLORAÇÃO
 // ========================
-let exploracaoAtiva = new Map(); // playerId -> { interval, regiao }
+let exploracaoAtiva = new Map();
+let batalhasAtivas = new Map();
+let interacoesNPC = new Map();
 
 async function cmdAndar(args, message, telefone) {
     const player = await ensurePlayerExists(telefone, message);
     if (!player) return;
     if (exploracaoAtiva.has(player.id)) {
-        message.reply('Você já está explorando. Use `/parar` para sair.');
+        sendReply(message, 'Você já está explorando. Use `/parar` para sair.');
         return;
     }
     if (player.fadiga < 10) {
-        message.reply('Você está exausto. Descanse primeiro (`/descansar`).');
+        sendReply(message, 'Você está exausto. Descanse primeiro (`/descansar`).');
         return;
     }
     const regiao = args[0] || 'Floresta Sombria';
     await updatePlayer(player.id, 'localizacao', regiao);
-    message.reply(`🌲 Você entrou na ${regiao} para explorar. A cada 5 minutos, eventos acontecerão. Use /parar para sair.`);
+    sendReply(message, `🌲 Você entrou na ${regiao} para explorar. A cada 5 minutos, eventos acontecerão. Use /parar para sair.`);
     
-    // Inicia intervalo de eventos
     const interval = setInterval(async () => {
         const p = await getPlayer(telefone);
         if (!p || !exploracaoAtiva.has(p.id)) return;
-        // Reduz fadiga a cada evento
         if (p.fadiga <= 0) {
             clearInterval(interval);
             exploracaoAtiva.delete(p.id);
@@ -657,22 +632,21 @@ async function cmdAndar(args, message, telefone) {
         }
         await updatePlayer(p.id, 'fadiga', p.fadiga - 2);
         
-        // Evento aleatório
         const evento = rollDice(100);
-        if (evento <= 30) { // monstro
+        if (evento <= 30) {
             await iniciarCombateMonstro(p, message);
-        } else if (evento <= 45) { // NPC
+        } else if (evento <= 45) {
             await encontrarNPC(p, message);
-        } else if (evento <= 60) { // item
-            const itemId = 1; // Poção pequena
+        } else if (evento <= 60) {
+            const itemId = 1;
             db.run(`INSERT INTO inventario (player_id, item_id, quantidade) VALUES (?, ?, 1) ON CONFLICT(player_id, item_id) DO UPDATE SET quantidade = quantidade + 1`, [p.id, itemId]);
             client.sendMessage(message.from, `🍃 Você encontrou uma poção de Qi! Foi adicionada ao seu inventário.`);
-        } else if (evento <= 70) { // outro jogador
+        } else if (evento <= 70) {
             await encontrarJogador(p, message);
         } else {
             client.sendMessage(message.from, `🍃 Nada de especial aconteceu... Você continua explorando.`);
         }
-    }, 300000); // 5 minutos
+    }, 300000);
     
     exploracaoAtiva.set(player.id, { interval, regiao });
 }
@@ -682,20 +656,18 @@ async function cmdParar(args, message, telefone) {
     if (!player) return;
     const expl = exploracaoAtiva.get(player.id);
     if (!expl) {
-        message.reply('Você não está explorando no momento.');
+        sendReply(message, 'Você não está explorando no momento.');
         return;
     }
     clearInterval(expl.interval);
     exploracaoAtiva.delete(player.id);
-    message.reply('🚶 Você parou de explorar e retornou à vila.');
+    sendReply(message, '🚶 Você parou de explorar e retornou à vila.');
 }
 
-// Funções auxiliares de combate e encontros
 async function iniciarCombateMonstro(player, msg) {
     const monstros = ['Lobo Selvagem', 'Espírito de Árvore', 'Goblin Ladrão'];
     const monstro = monstros[Math.floor(Math.random()*monstros.length)];
     const hpMonstro = 50 + rollDice(30);
-    // Armazena estado de combate
     batalhasAtivas.set(player.id, {
         tipo: 'monstro',
         nome: monstro,
@@ -708,78 +680,72 @@ async function iniciarCombateMonstro(player, msg) {
 }
 
 async function encontrarNPC(player, msg) {
-    // Busca NPC aleatório do banco
     db.get(`SELECT * FROM npcs WHERE localizacao = ? OR localizacao = 'global' ORDER BY RANDOM() LIMIT 1`, [player.localizacao], (err, npc) => {
         if (err || !npc) {
             client.sendMessage(msg.from, `👤 Um andarilho misterioso cruza seu caminho, mas desaparece na névoa.`);
             return;
         }
         client.sendMessage(msg.from, `👤 *${npc.nome}*: "${npc.dialogo_inicial}"\n\nOpções:\n1. Perguntar sobre missões\n2. Oferecer presente\n3. Seguir em frente`);
-        // Armazenar estado de interação com NPC
         interacoesNPC.set(player.id, { npcId: npc.id, etapa: 0 });
     });
 }
 
-let interacoesNPC = new Map();
-
-// Adicione estas funções ao seu bot.js (substituindo os placeholders)
+async function encontrarJogador(player, msg) {
+    // Placeholder: encontrar outro jogador na mesma região (implementação posterior)
+    client.sendMessage(msg.from, `👥 Você avista outro cultivador ao longe, mas ele desaparece na neblina.`);
+}
 
 async function cmdAtacar(args, message, telefone) {
     const player = await ensurePlayerExists(telefone, message);
     if (!player) return;
     const batalha = batalhasAtivas.get(player.id);
-    if (!batalha) { message.reply('Você não está em combate.'); return; }
+    if (!batalha) { sendReply(message, 'Você não está em combate.'); return; }
     
     let dano = player.forca + rollDice(15);
     
-    // MONSTRO COMUM
     if (batalha.tipo === 'monstro') {
         batalha.hp -= dano;
-        message.reply(`⚔️ Você ataca o ${batalha.nome} e causa ${dano} de dano. HP restante: ${batalha.hp}/${batalha.hpMax}`);
+        sendReply(message, `⚔️ Você ataca o ${batalha.nome} e causa ${dano} de dano. HP restante: ${batalha.hp}/${batalha.hpMax}`);
         if (batalha.hp <= 0) {
             const recompensaOuro = 10 + rollDice(20);
             await updatePlayer(player.id, 'ouro', player.ouro + recompensaOuro);
-            message.reply(`🏆 Você derrotou ${batalha.nome}! Ganhou ${recompensaOuro} ouro.`);
+            sendReply(message, `🏆 Você derrotou ${batalha.nome}! Ganhou ${recompensaOuro} ouro.`);
             batalhasAtivas.delete(player.id);
             if (rollDice(100) <= 30) {
                 const itemId = 2;
                 db.run(`INSERT INTO inventario (player_id, item_id, quantidade) VALUES (?, ?, 1) ON CONFLICT(player_id, item_id) DO UPDATE SET quantidade = quantidade + 1`, [player.id, itemId]);
-                message.reply(`🎁 Drop: Poção de Vida!`);
+                sendReply(message, `🎁 Drop: Poção de Vida!`);
             }
         } else {
             const danoMonstro = 5 + rollDice(10);
             let novoHP = player.hp_atual - danoMonstro;
             if (novoHP < 0) novoHP = 0;
             await updatePlayer(player.id, 'hp_atual', novoHP);
-            message.reply(`🐺 ${batalha.nome} ataca e causa ${danoMonstro} de dano. Seu HP: ${novoHP}/${player.hp_maximo}`);
+            sendReply(message, `🐺 ${batalha.nome} ataca e causa ${danoMonstro} de dano. Seu HP: ${novoHP}/${player.hp_maximo}`);
             if (novoHP <= 0) {
-                message.reply(`💀 Você foi derrotado! Perdeu 10 ouro e acorda na vila.`);
+                sendReply(message, `💀 Você foi derrotado! Perdeu 10 ouro e acorda na vila.`);
                 await updatePlayer(player.id, 'ouro', Math.max(0, player.ouro - 10));
                 await updatePlayer(player.id, 'hp_atual', player.hp_maximo);
                 batalhasAtivas.delete(player.id);
             }
         }
-    } 
-    // DOMÍNIO
-    else if (batalha.tipo === 'dominio') {
+    } else if (batalha.tipo === 'dominio') {
         batalha.hpInimigo -= dano;
-        message.reply(`⚔️ Você ataca o ${batalha.inimigo.nome} e causa ${dano} de dano. HP restante: ${batalha.hpInimigo}/${batalha.inimigo.hp}`);
+        sendReply(message, `⚔️ Você ataca o ${batalha.inimigo.nome} e causa ${dano} de dano. HP restante: ${batalha.hpInimigo}/${batalha.inimigo.hp}`);
         if (batalha.hpInimigo <= 0) {
-            message.reply(`🏆 Você derrotou ${batalha.inimigo.nome}!`);
-            // Busca informações do domínio
+            sendReply(message, `🏆 Você derrotou ${batalha.inimigo.nome}!`);
             db.get(`SELECT di.*, d.andares, d.recompensa_base_ouro FROM dominio_instancias di JOIN dominios d ON di.dominio_id = d.id WHERE di.player_id = ? AND di.dominio_id = ?`, [player.id, batalha.dominioId], async (err, instancia) => {
                 if (err || !instancia) return;
                 const novoAndar = batalha.andar + 1;
                 if (novoAndar > instancia.andares) {
-                    // Concluiu
                     db.run(`UPDATE dominio_instancias SET status = 'concluido' WHERE player_id = ? AND dominio_id = ?`, [player.id, batalha.dominioId]);
                     const recompensa = instancia.recompensa_base_ouro + (instancia.andares * 10);
                     await updatePlayer(player.id, 'ouro', player.ouro + recompensa);
-                    message.reply(`🎉 *DOMÍNIO CONCLUÍDO!* Você recebeu ${recompensa} ouro.`);
+                    sendReply(message, `🎉 *DOMÍNIO CONCLUÍDO!* Você recebeu ${recompensa} ouro.`);
                     batalhasAtivas.delete(player.id);
                 } else {
                     db.run(`UPDATE dominio_instancias SET andar_atual = ? WHERE player_id = ? AND dominio_id = ?`, [novoAndar, player.id, batalha.dominioId]);
-                    message.reply(`✨ Você avança para o andar ${novoAndar}/${instancia.andares}. Use /dominio continuar para prosseguir.`);
+                    sendReply(message, `✨ Você avança para o andar ${novoAndar}/${instancia.andares}. Use /dominio continuar para prosseguir.`);
                     batalhasAtivas.delete(player.id);
                 }
             });
@@ -788,19 +754,16 @@ async function cmdAtacar(args, message, telefone) {
             let novoHP = player.hp_atual - danoInimigo;
             if (novoHP < 0) novoHP = 0;
             await updatePlayer(player.id, 'hp_atual', novoHP);
-            message.reply(`💥 ${batalha.inimigo.nome} ataca e causa ${danoInimigo} de dano. Seu HP: ${novoHP}/${player.hp_maximo}`);
+            sendReply(message, `💥 ${batalha.inimigo.nome} ataca e causa ${danoInimigo} de dano. Seu HP: ${novoHP}/${player.hp_maximo}`);
             if (novoHP <= 0) {
-                message.reply(`💀 Você foi derrotado no domínio! Perdeu o progresso e retorna à vila.`);
+                sendReply(message, `💀 Você foi derrotado no domínio! Perdeu o progresso e retorna à vila.`);
                 db.run(`DELETE FROM dominio_instancias WHERE player_id = ? AND dominio_id = ?`, [player.id, batalha.dominioId]);
                 batalhasAtivas.delete(player.id);
                 await updatePlayer(player.id, 'hp_atual', player.hp_maximo);
             }
         }
-    }
-    // PvP (opcional)
-    else if (batalha.tipo === 'pvp') {
-        // Lógica similar, omitida por brevidade
-        message.reply(`Combate PvP em desenvolvimento.`);
+    } else {
+        sendReply(message, `Combate PvP em desenvolvimento.`);
     }
 }
 
@@ -808,8 +771,8 @@ async function cmdDefender(args, message, telefone) {
     const player = await ensurePlayerExists(telefone, message);
     if (!player) return;
     const batalha = batalhasAtivas.get(player.id);
-    if (!batalha) { message.reply('Você não está em combate.'); return; }
-    message.reply(`🛡️ Você se defende, reduzindo o próximo dano pela metade.`);
+    if (!batalha) { sendReply(message, 'Você não está em combate.'); return; }
+    sendReply(message, `🛡️ Você se defende, reduzindo o próximo dano pela metade.`);
     batalha.defendendo = true;
 }
 
@@ -817,20 +780,19 @@ async function cmdFugir(args, message, telefone) {
     const player = await ensurePlayerExists(telefone, message);
     if (!player) return;
     const batalha = batalhasAtivas.get(player.id);
-    if (!batalha) { message.reply('Você não está em combate.'); return; }
+    if (!batalha) { sendReply(message, 'Você não está em combate.'); return; }
     const chance = player.agilidade / 100;
     if (Math.random() < chance) {
-        message.reply(`🏃 Você fugiu com sucesso!`);
+        sendReply(message, `🏃 Você fugiu com sucesso!`);
         batalhasAtivas.delete(player.id);
     } else {
-        message.reply(`😫 Você tentou fugir, mas falhou! O inimigo ataca.`);
-        // Turno do inimigo
+        sendReply(message, `😫 Você tentou fugir, mas falhou! O inimigo ataca.`);
         if (batalha.tipo === 'monstro') {
             const danoMonstro = 5 + rollDice(10);
             let novoHP = player.hp_atual - danoMonstro;
             if (novoHP < 0) novoHP = 0;
             await updatePlayer(player.id, 'hp_atual', novoHP);
-            message.reply(`🐺 ${batalha.nome} causa ${danoMonstro} de dano. HP: ${novoHP}/${player.hp_maximo}`);
+            sendReply(message, `🐺 ${batalha.nome} causa ${danoMonstro} de dano. HP: ${novoHP}/${player.hp_maximo}`);
         }
     }
 }
@@ -839,19 +801,19 @@ async function cmdUsarTecnica(args, message, telefone) {
     const player = await ensurePlayerExists(telefone, message);
     if (!player) return;
     const batalha = batalhasAtivas.get(player.id);
-    if (!batalha) { message.reply('Você não está em combate.'); return; }
-    if (!args[0]) { message.reply('Uso: `/usartecnica <id_tecnica>`'); return; }
+    if (!batalha) { sendReply(message, 'Você não está em combate.'); return; }
+    if (!args[0]) { sendReply(message, 'Uso: `/usartecnica <id_tecnica>`'); return; }
     const idTec = parseInt(args[0]);
     db.get(`SELECT t.* FROM tecnicas_aprendidas ta JOIN tecnicas t ON ta.tecnica_id = t.id WHERE ta.player_id = ? AND ta.tecnica_id = ? AND ta.aprendida = 1`, [player.id, idTec], async (err, row) => {
-        if (err || !row) return message.reply('Você não aprendeu essa técnica ou ela não existe.');
-        if (player.qi_atual < row.custo_qi) return message.reply(`Qi insuficiente. Necessário ${row.custo_qi}.`);
+        if (err || !row) return sendReply(message, 'Você não aprendeu essa técnica ou ela não existe.');
+        if (player.qi_atual < row.custo_qi) return sendReply(message, `Qi insuficiente. Necessário ${row.custo_qi}.`);
         let dano = row.poder_base + (row.tipo === 'Fisica' ? player.forca : player.inteligencia);
         await updatePlayer(player.id, 'qi_atual', player.qi_atual - row.custo_qi);
-        message.reply(`✨ Você usou *${row.nome}* e causou ${dano} de dano!`);
+        sendReply(message, `✨ Você usou *${row.nome}* e causou ${dano} de dano!`);
         if (batalha.tipo === 'monstro') {
             batalha.hp -= dano;
             if (batalha.hp <= 0) {
-                message.reply(`🏆 Você derrotou ${batalha.nome}!`);
+                sendReply(message, `🏆 Você derrotou ${batalha.nome}!`);
                 batalhasAtivas.delete(player.id);
             }
         }
@@ -865,24 +827,22 @@ async function cmdUsarTecnica(args, message, telefone) {
 async function cmdCriarSeita(args, message, telefone) {
     const player = await ensurePlayerExists(telefone, message);
     if (!player) return;
-    if (args.length < 2) { message.reply('Uso: `/criarseita <nome> <descricao>`'); return; }
+    if (args.length < 2) { sendReply(message, 'Uso: `/criarseita <nome> <descricao>`'); return; }
     const nome = args[0];
     const desc = args.slice(1).join(' ');
-    // Verifica se já existe seita com esse nome
     db.get(`SELECT id FROM seitas WHERE nome = ?`, [nome], async (err, row) => {
-        if (row) return message.reply('Já existe uma seita com esse nome.');
+        if (row) return sendReply(message, 'Já existe uma seita com esse nome.');
         if (player.ouro < 1000 && player.cristais_esp < 1) {
-            return message.reply('Você precisa de 1000 ouro ou 1 Cristal Espiritual para criar uma seita.');
+            return sendReply(message, 'Você precisa de 1000 ouro ou 1 Cristal Espiritual para criar uma seita.');
         }
-        // Cobrar custo
         if (player.ouro >= 1000) await updatePlayer(player.id, 'ouro', player.ouro - 1000);
         else await updatePlayer(player.id, 'cristais_esp', player.cristais_esp - 1);
         
         db.run(`INSERT INTO seitas (nome, descricao, lider_id, tesouro) VALUES (?, ?, ?, 0)`, [nome, desc, player.id], function(err) {
-            if (err) return message.reply('Erro ao criar seita.');
+            if (err) return sendReply(message, 'Erro ao criar seita.');
             const seitaId = this.lastID;
             db.run(`INSERT INTO seita_membros (seita_id, player_id, cargo) VALUES (?, ?, 'lider')`, [seitaId, player.id]);
-            message.reply(`🏛️ Seita *${nome}* criada com sucesso! Você é o líder. Use /convidar <id> para adicionar membros.`);
+            sendReply(message, `🏛️ Seita *${nome}* criada com sucesso! Você é o líder. Use /convidar <id> para adicionar membros.`);
         });
     });
 }
@@ -890,27 +850,25 @@ async function cmdCriarSeita(args, message, telefone) {
 async function cmdConvidar(args, message, telefone) {
     const player = await ensurePlayerExists(telefone, message);
     if (!player) return;
-    if (!args[0]) { message.reply('Uso: `/convidar <id_do_jogador>`'); return; }
+    if (!args[0]) { sendReply(message, 'Uso: `/convidar <id_do_jogador>`'); return; }
     const alvoId = args[0];
-    // Verifica se é líder de alguma seita
     db.get(`SELECT s.* FROM seitas s WHERE s.lider_id = ?`, [player.id], async (err, seita) => {
-        if (!seita) return message.reply('Você não é líder de nenhuma seita.');
+        if (!seita) return sendReply(message, 'Você não é líder de nenhuma seita.');
         const alvo = await getPlayerByUniqueId(alvoId);
-        if (!alvo) return message.reply('Jogador não encontrado.');
-        // Envia convite (simplificado: apenas mensagem)
+        if (!alvo) return sendReply(message, 'Jogador não encontrado.');
         client.sendMessage(alvo.telefone + '@c.us', `🏮 Você foi convidado para entrar na seita *${seita.nome}*. Use /aceitarconvite ${seita.id} para aceitar.`);
-        message.reply(`Convite enviado para ${alvo.nome}.`);
+        sendReply(message, `Convite enviado para ${alvo.nome}.`);
     });
 }
 
 async function cmdAceitarConvite(args, message, telefone) {
     const player = await ensurePlayerExists(telefone, message);
     if (!player) return;
-    if (!args[0]) { message.reply('Uso: `/aceitarconvite <id_seita>`'); return; }
+    if (!args[0]) { sendReply(message, 'Uso: `/aceitarconvite <id_seita>`'); return; }
     const seitaId = parseInt(args[0]);
     db.run(`INSERT INTO seita_membros (seita_id, player_id, cargo) VALUES (?, ?, 'membro')`, [seitaId, player.id], (err) => {
-        if (err) message.reply('Erro ao entrar na seita. Talvez você já seja membro.');
-        else message.reply('🎉 Você agora é membro da seita!');
+        if (err) sendReply(message, 'Erro ao entrar na seita. Talvez você já seja membro.');
+        else sendReply(message, '🎉 Você agora é membro da seita!');
     });
 }
 
@@ -918,22 +876,21 @@ async function cmdSairSeita(args, message, telefone) {
     const player = await ensurePlayerExists(telefone, message);
     if (!player) return;
     db.run(`DELETE FROM seita_membros WHERE player_id = ?`, [player.id], (err) => {
-        if (err) message.reply('Erro ao sair.');
-        else message.reply('Você saiu da seita.');
+        if (err) sendReply(message, 'Erro ao sair.');
+        else sendReply(message, 'Você saiu da seita.');
     });
 }
 
 async function cmdMissoes(args, message, telefone) {
     const player = await ensurePlayerExists(telefone, message);
     if (!player) return;
-    // Busca missões da seita do jogador
     db.get(`SELECT seita_id FROM seita_membros WHERE player_id = ?`, [player.id], (err, row) => {
-        if (!row) return message.reply('Você não pertence a nenhuma seita.');
+        if (!row) return sendReply(message, 'Você não pertence a nenhuma seita.');
         db.all(`SELECT * FROM missoes_seita WHERE seita_id = ? AND status = 'aberta'`, [row.seita_id], (err, missoes) => {
-            if (missoes.length === 0) return message.reply('Nenhuma missão disponível na seita.');
+            if (missoes.length === 0) return sendReply(message, 'Nenhuma missão disponível na seita.');
             let txt = '📜 *Missões da Seita*\n';
             missoes.forEach(m => txt += `\nID:${m.id} - Dificuldade:${m.dificuldade} - Recompensa:${m.recompensa_moeda} ouro - ${m.objetivo}`);
-            message.reply(txt);
+            sendReply(message, txt);
         });
     });
 }
@@ -941,38 +898,36 @@ async function cmdMissoes(args, message, telefone) {
 async function cmdAceitarMissao(args, message, telefone) {
     const player = await ensurePlayerExists(telefone, message);
     if (!player) return;
-    if (!args[0]) { message.reply('Uso: `/aceitar <id_missao>`'); return; }
+    if (!args[0]) { sendReply(message, 'Uso: `/aceitar <id_missao>`'); return; }
     const missaoId = parseInt(args[0]);
     db.run(`UPDATE missoes_seita SET status = 'em_andamento', aceita_por = ? WHERE id = ? AND status = 'aberta'`, [player.id, missaoId], function(err) {
-        if (err || this.changes === 0) message.reply('Missão não disponível ou já aceita.');
-        else message.reply('Missão aceita! Complete o objetivo e use `/completarmissao <id>` quando terminar.');
+        if (err || this.changes === 0) sendReply(message, 'Missão não disponível ou já aceita.');
+        else sendReply(message, 'Missão aceita! Complete o objetivo e use `/completarmissao <id>` quando terminar.');
     });
 }
 
 async function cmdDoar(args, message, telefone) {
     const player = await ensurePlayerExists(telefone, message);
     if (!player) return;
-    if (!args[0]) { message.reply('Uso: `/doar <quantidade>` (em ouro)'); return; }
+    if (!args[0]) { sendReply(message, 'Uso: `/doar <quantidade>` (em ouro)'); return; }
     const quant = parseInt(args[0]);
-    if (player.ouro < quant) return message.reply('Você não tem ouro suficiente.');
+    if (player.ouro < quant) return sendReply(message, 'Você não tem ouro suficiente.');
     await updatePlayer(player.id, 'ouro', player.ouro - quant);
     db.get(`SELECT seita_id FROM seita_membros WHERE player_id = ?`, [player.id], (err, row) => {
         if (row) db.run(`UPDATE seitas SET tesouro = tesouro + ? WHERE id = ?`, [quant, row.seita_id]);
     });
-    message.reply(`Você doou ${quant} ouro para o tesouro da seita.`);
+    sendReply(message, `Você doou ${quant} ouro para o tesouro da seita.`);
 }
 
 async function cmdTecnicaSeita(args, message, telefone) {
     const player = await ensurePlayerExists(telefone, message);
     if (!player) return;
-    if (!args[0]) { message.reply('Uso: `/tecnicaseita <id_tecnica>`'); return; }
+    if (!args[0]) { sendReply(message, 'Uso: `/tecnicaseita <id_tecnica>`'); return; }
     const tecId = parseInt(args[0]);
-    // Verifica se é líder
     db.get(`SELECT s.id FROM seitas s WHERE s.lider_id = ?`, [player.id], (err, seita) => {
-        if (!seita) return message.reply('Apenas o líder pode adicionar técnicas à seita.');
-        // Adiciona técnica à biblioteca (tabela biblioteca_seita)
+        if (!seita) return sendReply(message, 'Apenas o líder pode adicionar técnicas à seita.');
         db.run(`INSERT OR IGNORE INTO biblioteca_seita (seita_id, tecnica_id) VALUES (?, ?)`, [seita.id, tecId]);
-        message.reply(`Técnica adicionada à biblioteca da seita.`);
+        sendReply(message, `Técnica adicionada à biblioteca da seita.`);
     });
 }
 
@@ -980,12 +935,12 @@ async function cmdBiblioteca(args, message, telefone) {
     const player = await ensurePlayerExists(telefone, message);
     if (!player) return;
     db.get(`SELECT seita_id FROM seita_membros WHERE player_id = ?`, [player.id], (err, row) => {
-        if (!row) return message.reply('Você não pertence a nenhuma seita.');
+        if (!row) return sendReply(message, 'Você não pertence a nenhuma seita.');
         db.all(`SELECT t.id, t.nome FROM biblioteca_seita bs JOIN tecnicas t ON bs.tecnica_id = t.id WHERE bs.seita_id = ?`, [row.seita_id], (err, tecs) => {
-            if (!tecs.length) return message.reply('A biblioteca da seita está vazia.');
+            if (!tecs.length) return sendReply(message, 'A biblioteca da seita está vazia.');
             let txt = '📚 *Biblioteca da Seita*\n';
             tecs.forEach(t => txt += `\n${t.id} - ${t.nome}`);
-            message.reply(txt);
+            sendReply(message, txt);
         });
     });
 }
@@ -993,18 +948,16 @@ async function cmdBiblioteca(args, message, telefone) {
 async function cmdAprenderSeita(args, message, telefone) {
     const player = await ensurePlayerExists(telefone, message);
     if (!player) return;
-    if (!args[0]) { message.reply('Uso: `/aprender_seita <id_tecnica>`'); return; }
+    if (!args[0]) { sendReply(message, 'Uso: `/aprender_seita <id_tecnica>`'); return; }
     const tecId = parseInt(args[0]);
-    // Verifica se a técnica está na biblioteca da seita do jogador
     db.get(`SELECT seita_id FROM seita_membros WHERE player_id = ?`, [player.id], (err, membro) => {
-        if (!membro) return message.reply('Você não está em uma seita.');
+        if (!membro) return sendReply(message, 'Você não está em uma seita.');
         db.get(`SELECT * FROM biblioteca_seita WHERE seita_id = ? AND tecnica_id = ?`, [membro.seita_id, tecId], async (err, bib) => {
-            if (!bib) return message.reply('Essa técnica não está na biblioteca.');
-            // Verifica se já não aprendeu
+            if (!bib) return sendReply(message, 'Essa técnica não está na biblioteca.');
             db.get(`SELECT * FROM tecnicas_aprendidas WHERE player_id = ? AND tecnica_id = ?`, [player.id, tecId], async (err, exist) => {
-                if (exist) return message.reply('Você já conhece essa técnica.');
+                if (exist) return sendReply(message, 'Você já conhece essa técnica.');
                 db.run(`INSERT INTO tecnicas_aprendidas (player_id, tecnica_id, compreensao, aprendida) VALUES (?, ?, 0, 0)`, [player.id, tecId]);
-                message.reply(`Você começou a estudar a técnica *${tecId}*. Use /compreender para evoluir.`);
+                sendReply(message, `Você começou a estudar a técnica *${tecId}*. Use /compreender para evoluir.`);
             });
         });
     });
@@ -1018,37 +971,33 @@ async function cmdProfissao(args, message, telefone) {
     const player = await ensurePlayerExists(telefone, message);
     if (!player) return;
     if (args[0] === 'listar') {
-        message.reply(`Profissões disponíveis: Alquimista, Forjador, Médico, Mestre de Talismã, Mestre de Formações. Use /profissao escolher <nome>`);
+        sendReply(message, `Profissões disponíveis: Alquimista, Forjador, Médico, Mestre de Talismã, Mestre de Formações. Use /profissao escolher <nome>`);
     } else if (args[0] === 'escolher' && args[1]) {
         const prof = args[1].toLowerCase();
         const validas = ['alquimista', 'forjador', 'médico', 'mestre de talismã', 'mestre de formações'];
-        if (!validas.includes(prof)) return message.reply('Profissão inválida.');
+        if (!validas.includes(prof)) return sendReply(message, 'Profissão inválida.');
         await updatePlayer(player.id, 'profissao_principal', prof);
         await updatePlayer(player.id, 'nivel_profissao', 1);
-        // Inserir na tabela profissoes
         db.run(`INSERT OR REPLACE INTO profissoes (player_id, profissao, nivel, experiencia) VALUES (?, ?, 1, 0)`, [player.id, prof]);
-        message.reply(`Você agora é um ${prof}. Use /craftar para fabricar itens.`);
+        sendReply(message, `Você agora é um ${prof}. Use /craftar para fabricar itens.`);
     } else {
-        message.reply(`Sua profissão: ${player.profissao_principal || 'nenhuma'} (nível ${player.nivel_profissao || 0}). Use /profissao escolher <nome> para mudar.`);
+        sendReply(message, `Sua profissão: ${player.profissao_principal || 'nenhuma'} (nível ${player.nivel_profissao || 0}). Use /profissao escolher <nome> para mudar.`);
     }
 }
 
 async function cmdCraftar(args, message, telefone) {
     const player = await ensurePlayerExists(telefone, message);
     if (!player) return;
-    if (!player.profissao_principal) return message.reply('Você não tem uma profissão. Escolha uma com `/profissao escolher`.');
-    if (!args[0]) return message.reply('Uso: `/craftar <item>` (ex: poção, espada)');
+    if (!player.profissao_principal) return sendReply(message, 'Você não tem uma profissão. Escolha uma com `/profissao escolher`.');
+    if (!args[0]) return sendReply(message, 'Uso: `/craftar <item>` (ex: poção, espada)');
     const itemNome = args[0];
-    // Lógica simplificada: verifica materiais no inventário
-    // Por brevidade, vamos apenas simular
-    message.reply(`🧪 Você tentou craftar ${itemNome}, mas o sistema de crafting ainda está em desenvolvimento detalhado. Por hora, use /loja para comprar.`);
+    sendReply(message, `🧪 Você tentou craftar ${itemNome}, mas o sistema de crafting ainda está em desenvolvimento detalhado. Por hora, use /loja para comprar.`);
 }
 
 async function cmdSubirProfissao(args, message, telefone) {
     const player = await ensurePlayerExists(telefone, message);
     if (!player) return;
-    if (!player.profissao_principal) return message.reply('Você não tem profissão.');
-    // Gasta XP para subir de nível
+    if (!player.profissao_principal) return sendReply(message, 'Você não tem profissão.');
     db.get(`SELECT * FROM profissoes WHERE player_id = ?`, [player.id], async (err, row) => {
         if (!row) return;
         const xpNecessario = row.nivel * 100;
@@ -1056,9 +1005,9 @@ async function cmdSubirProfissao(args, message, telefone) {
             const novoNivel = row.nivel + 1;
             db.run(`UPDATE profissoes SET nivel = ?, experiencia = ? WHERE player_id = ?`, [novoNivel, row.experiencia - xpNecessario, player.id]);
             await updatePlayer(player.id, 'nivel_profissao', novoNivel);
-            message.reply(`🎉 Parabéns! Sua profissão agora é nível ${novoNivel}.`);
+            sendReply(message, `🎉 Parabéns! Sua profissão agora é nível ${novoNivel}.`);
         } else {
-            message.reply(`Você precisa de ${xpNecessario - row.experiencia} XP para subir de nível. Ganhe XP craftando.`);
+            sendReply(message, `Você precisa de ${xpNecessario - row.experiencia} XP para subir de nível. Ganhe XP craftando.`);
         }
     });
 }
@@ -1074,60 +1023,57 @@ async function cmdAmigos(args, message, telefone) {
         let txt = '👥 *Amigos*\n';
         rows.forEach(r => txt += `\n${r.nome} (${r.unique_id})`);
         if (!rows.length) txt += '\nNenhum amigo ainda.';
-        message.reply(txt);
+        sendReply(message, txt);
     });
 }
 
 async function cmdAdicionarAmigo(args, message, telefone) {
     const player = await ensurePlayerExists(telefone, message);
     if (!player) return;
-    if (!args[0]) { message.reply('Uso: `/adicionaramigo <id_do_jogador>`'); return; }
+    if (!args[0]) { sendReply(message, 'Uso: `/adicionaramigo <id_do_jogador>`'); return; }
     const alvoUnique = args[0];
     const alvo = await getPlayerByUniqueId(alvoUnique);
-    if (!alvo) return message.reply('Jogador não encontrado.');
+    if (!alvo) return sendReply(message, 'Jogador não encontrado.');
     db.run(`INSERT INTO amigos_inimigos (player_id, alvo_id, tipo) VALUES (?, ?, 'amigo')`, [player.id, alvo.id], (err) => {
-        if (err) message.reply('Já são amigos ou erro.');
-        else message.reply(`🤝 ${alvo.nome} agora é seu amigo!`);
+        if (err) sendReply(message, 'Já são amigos ou erro.');
+        else sendReply(message, `🤝 ${alvo.nome} agora é seu amigo!`);
     });
 }
 
 async function cmdInimigo(args, message, telefone) {
     const player = await ensurePlayerExists(telefone, message);
     if (!player) return;
-    if (!args[0]) { message.reply('Uso: `/inimigo <id_do_jogador>`'); return; }
+    if (!args[0]) { sendReply(message, 'Uso: `/inimigo <id_do_jogador>`'); return; }
     const alvoUnique = args[0];
     const alvo = await getPlayerByUniqueId(alvoUnique);
-    if (!alvo) return message.reply('Jogador não encontrado.');
+    if (!alvo) return sendReply(message, 'Jogador não encontrado.');
     db.run(`INSERT INTO amigos_inimigos (player_id, alvo_id, tipo) VALUES (?, ?, 'inimigo')`, [player.id, alvo.id], (err) => {
-        if (err) message.reply('Já é inimigo ou erro.');
-        else message.reply(`⚠️ Você declarou ${alvo.nome} como inimigo!`);
+        if (err) sendReply(message, 'Já é inimigo ou erro.');
+        else sendReply(message, `⚠️ Você declarou ${alvo.nome} como inimigo!`);
     });
 }
 
 async function cmdConversar(args, message, telefone) {
     const player = await ensurePlayerExists(telefone, message);
     if (!player) return;
-    if (args.length < 2) { message.reply('Uso: `/conversar <id_do_jogador> <mensagem>`'); return; }
+    if (args.length < 2) { sendReply(message, 'Uso: `/conversar <id_do_jogador> <mensagem>`'); return; }
     const alvoUnique = args[0];
     const texto = args.slice(1).join(' ');
     const alvo = await getPlayerByUniqueId(alvoUnique);
-    if (!alvo) return message.reply('Jogador não encontrado.');
-    // Verifica se o alvo está online (simplificado: se tiver sessão ativa)
-    // Salva mensagem no banco
+    if (!alvo) return sendReply(message, 'Jogador não encontrado.');
     db.run(`INSERT INTO mensagens_chat (de_id, para_id, mensagem, lida) VALUES (?, ?, ?, 0)`, [player.id, alvo.id, texto]);
-    message.reply(`Mensagem enviada para ${alvo.nome}.`);
-    // Se o alvo estiver online, tenta entregar imediatamente (opcional)
+    sendReply(message, `Mensagem enviada para ${alvo.nome}.`);
 }
 
 async function cmdLerChat(args, message, telefone) {
     const player = await ensurePlayerExists(telefone, message);
     if (!player) return;
     db.all(`SELECT m.mensagem, p.nome as de_nome FROM mensagens_chat m JOIN players p ON m.de_id = p.id WHERE m.para_id = ? AND m.lida = 0`, [player.id], (err, rows) => {
-        if (err || !rows.length) return message.reply('Nenhuma mensagem nova.');
+        if (err || !rows.length) return sendReply(message, 'Nenhuma mensagem nova.');
         let txt = '📬 *Mensagens não lidas*\n';
         rows.forEach(r => txt += `\n${r.de_nome}: ${r.mensagem}`);
         db.run(`UPDATE mensagens_chat SET lida = 1 WHERE para_id = ?`, [player.id]);
-        message.reply(txt);
+        sendReply(message, txt);
     });
 }
 
@@ -1139,17 +1085,16 @@ async function cmdDominio(args, message, telefone) {
     const player = await ensurePlayerExists(telefone, message);
     if (!player) return;
 
-    // Se não houver argumentos, lista os domínios disponíveis
     if (args.length === 0) {
         db.all(`SELECT * FROM dominios WHERE nivel_minimo <= ?`, [player.nivel_fisico], (err, dominios) => {
             if (err || dominios.length === 0) {
-                return message.reply('Nenhum domínio disponível para seu nível ainda.');
+                return sendReply(message, 'Nenhum domínio disponível para seu nível ainda.');
             }
             let txt = '🏰 *DOMÍNIOS DISPONÍVEIS*\n\n';
             dominios.forEach(d => {
                 txt += `*${d.nome}* (nível mínimo ${d.nivel_minimo})\n${d.descricao}\nAndares: ${d.andares} | Recompensa base: ${d.recompensa_base_ouro} ouro\nUse: \`/dominio entrar ${d.nome}\`\n\n`;
             });
-            message.reply(txt);
+            sendReply(message, txt);
         });
         return;
     }
@@ -1159,46 +1104,40 @@ async function cmdDominio(args, message, telefone) {
 
     if (subcmd === 'entrar') {
         if (!nomeDominio) {
-            message.reply('Use: `/dominio entrar <nome_do_dominio>`');
+            sendReply(message, 'Use: `/dominio entrar <nome_do_dominio>`');
             return;
         }
-        // Busca o domínio pelo nome
         db.get(`SELECT * FROM dominios WHERE nome = ? AND nivel_minimo <= ?`, [nomeDominio, player.nivel_fisico], async (err, dominio) => {
             if (err || !dominio) {
-                return message.reply('Domínio não encontrado ou seu nível é muito baixo.');
+                return sendReply(message, 'Domínio não encontrado ou seu nível é muito baixo.');
             }
-            // Verifica se já existe uma instância em andamento
             db.get(`SELECT * FROM dominio_instancias WHERE player_id = ? AND dominio_id = ? AND status = 'em_andamento'`, [player.id, dominio.id], async (err, instancia) => {
                 if (instancia) {
-                    return message.reply(`Você já está explorando ${dominio.nome} (andar ${instancia.andar_atual}/${dominio.andares}). Continue com /dominio continuar.`);
+                    return sendReply(message, `Você já está explorando ${dominio.nome} (andar ${instancia.andar_atual}/${dominio.andares}). Continue com /dominio continuar.`);
                 }
-                // Cria nova instância
                 db.run(`INSERT INTO dominio_instancias (player_id, dominio_id, andar_atual, status) VALUES (?, ?, 1, 'em_andamento')`, [player.id, dominio.id], (err) => {
-                    if (err) return message.reply('Erro ao entrar no domínio.');
-                    message.reply(`🌟 Você entrou no domínio *${dominio.nome}*. Andar 1/${dominio.andares}. Use /dominio continuar para avançar.`);
+                    if (err) return sendReply(message, 'Erro ao entrar no domínio.');
+                    sendReply(message, `🌟 Você entrou no domínio *${dominio.nome}*. Andar 1/${dominio.andares}. Use /dominio continuar para avançar.`);
                 });
             });
         });
     } 
     else if (subcmd === 'continuar') {
-        // Continua a exploração do domínio atual
         db.get(`SELECT di.*, d.nome, d.andares, d.recompensa_base_ouro, d.item_raru_id 
                 FROM dominio_instancias di 
                 JOIN dominios d ON di.dominio_id = d.id 
                 WHERE di.player_id = ? AND di.status = 'em_andamento'`, [player.id], async (err, instancia) => {
             if (err || !instancia) {
-                return message.reply('Você não está em nenhum domínio no momento. Use `/dominio entrar <nome>` para começar.');
+                return sendReply(message, 'Você não está em nenhum domínio no momento. Use `/dominio entrar <nome>` para começar.');
             }
             const andarAtual = instancia.andar_atual;
             const totalAndares = instancia.andares;
             const nomeDominio = instancia.nome;
 
-            // Gera um inimigo para este andar
             const inimigo = gerarInimigoDominio(andarAtual, totalAndares);
             
-            message.reply(`🏯 *${nomeDominio} - Andar ${andarAtual}/${totalAndares}*\n⚔️ Você encontra: *${inimigo.nome}* (HP: ${inimigo.hp})\nUse /atacar, /defender, /usaritem, /usartecnica.`);
+            sendReply(message, `🏯 *${nomeDominio} - Andar ${andarAtual}/${totalAndares}*\n⚔️ Você encontra: *${inimigo.nome}* (HP: ${inimigo.hp})\nUse /atacar, /defender, /usaritem, /usartecnica.`);
             
-            // Armazena o estado do combate do domínio
             batalhasAtivas.set(player.id, {
                 tipo: 'dominio',
                 dominioId: instancia.dominio_id,
@@ -1210,11 +1149,10 @@ async function cmdDominio(args, message, telefone) {
         });
     }
     else {
-        message.reply('Comandos de domínio: `/dominio` (lista), `/dominio entrar <nome>`, `/dominio continuar`');
+        sendReply(message, 'Comandos de domínio: `/dominio` (lista), `/dominio entrar <nome>`, `/dominio continuar`');
     }
 }
 
-// Função auxiliar para gerar inimigos baseados no andar
 function gerarInimigoDominio(andarAtual, totalAndares) {
     const isChefe = (andarAtual === totalAndares);
     const baseHP = 30 + (andarAtual * 10);
@@ -1240,7 +1178,6 @@ function gerarInimigoDominio(andarAtual, totalAndares) {
     }
 }
 
-
 // ========================
 // MISSÕES PESSOAIS
 // ========================
@@ -1248,14 +1185,14 @@ function gerarInimigoDominio(andarAtual, totalAndares) {
 async function cmdCriarMissaoPessoal(args, message, telefone) {
     const player = await ensurePlayerExists(telefone, message);
     if (!player) return;
-    if (args.length < 2) { message.reply('Uso: `/criarmissao <descrição> <recompensa_ouro>`'); return; }
+    if (args.length < 2) { sendReply(message, 'Uso: `/criarmissao <descrição> <recompensa_ouro>`'); return; }
     const recompensa = parseInt(args[args.length-1]);
     const desc = args.slice(0, -1).join(' ');
-    if (player.ouro < recompensa) return message.reply('Você não tem ouro suficiente para pagar essa recompensa.');
+    if (player.ouro < recompensa) return sendReply(message, 'Você não tem ouro suficiente para pagar essa recompensa.');
     await updatePlayer(player.id, 'ouro', player.ouro - recompensa);
     db.run(`INSERT INTO missoes_pessoais (criador_id, descricao, recompensa_moeda, status) VALUES (?, ?, ?, 'aberta')`, [player.id, desc, recompensa], function(err) {
-        if (err) message.reply('Erro ao criar missão.');
-        else message.reply(`✅ Missão criada! ID: ${this.lastID}. Outros jogadores podem aceitá-la.`);
+        if (err) sendReply(message, 'Erro ao criar missão.');
+        else sendReply(message, `✅ Missão criada! ID: ${this.lastID}. Outros jogadores podem aceitá-la.`);
     });
 }
 
@@ -1263,36 +1200,34 @@ async function cmdMissoesDisponiveis(args, message, telefone) {
     const player = await ensurePlayerExists(telefone, message);
     if (!player) return;
     db.all(`SELECT mp.id, mp.descricao, mp.recompensa_moeda, p.nome as criador FROM missoes_pessoais mp JOIN players p ON mp.criador_id = p.id WHERE mp.status = 'aberta' AND mp.criador_id != ?`, [player.id], (err, rows) => {
-        if (!rows.length) return message.reply('Nenhuma missão disponível.');
+        if (!rows.length) return sendReply(message, 'Nenhuma missão disponível.');
         let txt = '📋 *Missões de outros jogadores*\n';
         rows.forEach(r => txt += `\nID:${r.id} - ${r.descricao} - Recompensa: ${r.recompensa_moeda} ouro - Criador: ${r.criador}`);
-        message.reply(txt);
+        sendReply(message, txt);
     });
 }
 
 async function cmdAceitarMissaoPessoal(args, message, telefone) {
     const player = await ensurePlayerExists(telefone, message);
     if (!player) return;
-    if (!args[0]) { message.reply('Uso: `/aceitarmissao <id_missao>`'); return; }
+    if (!args[0]) { sendReply(message, 'Uso: `/aceitarmissao <id_missao>`'); return; }
     const missaoId = parseInt(args[0]);
     db.run(`UPDATE missoes_pessoais SET status = 'em_andamento' WHERE id = ? AND status = 'aberta'`, [missaoId], function(err) {
-        if (err || this.changes === 0) message.reply('Missão não disponível.');
-        else message.reply('Missão aceita! Complete o objetivo e use `/completarmissao <id>` quando terminar.');
+        if (err || this.changes === 0) sendReply(message, 'Missão não disponível.');
+        else sendReply(message, 'Missão aceita! Complete o objetivo e use `/completarmissao <id>` quando terminar.');
     });
 }
 
 async function cmdCompletarMissaoPessoal(args, message, telefone) {
     const player = await ensurePlayerExists(telefone, message);
     if (!player) return;
-    if (!args[0]) { message.reply('Uso: `/completarmissao <id_missao>`'); return; }
+    if (!args[0]) { sendReply(message, 'Uso: `/completarmissao <id_missao>`'); return; }
     const missaoId = parseInt(args[0]);
     db.get(`SELECT * FROM missoes_pessoais WHERE id = ? AND status = 'em_andamento' AND criador_id != ?`, [missaoId, player.id], async (err, missao) => {
-        if (!missao) return message.reply('Missão não encontrada ou não está em andamento.');
-        // Recompensa
+        if (!missao) return sendReply(message, 'Missão não encontrada ou não está em andamento.');
         await updatePlayer(player.id, 'ouro', player.ouro + missao.recompensa_moeda);
         db.run(`UPDATE missoes_pessoais SET status = 'concluida' WHERE id = ?`, [missaoId]);
-        message.reply(`🎉 Missão concluída! Você recebeu ${missao.recompensa_moeda} ouro.`);
-        // Notificar criador
+        sendReply(message, `🎉 Missão concluída! Você recebeu ${missao.recompensa_moeda} ouro.`);
         const criador = await getPlayerById(missao.criador_id);
         if (criador) client.sendMessage(criador.telefone + '@c.us', `📢 Sua missão "${missao.descricao}" foi concluída por ${player.nome}.`);
     });
@@ -1304,7 +1239,7 @@ async function cmdMinhasMissoes(args, message, telefone) {
     db.all(`SELECT * FROM missoes_pessoais WHERE criador_id = ?`, [player.id], (err, rows) => {
         let txt = '📌 *Suas missões criadas*\n';
         rows.forEach(r => txt += `\nID:${r.id} - ${r.descricao} - Status: ${r.status} - Recompensa: ${r.recompensa_moeda}`);
-        message.reply(txt);
+        sendReply(message, txt);
     });
 }
 
@@ -1314,14 +1249,13 @@ async function cmdMinhasMissoes(args, message, telefone) {
 
 async function cmdEventos(args, message, telefone) {
     db.all(`SELECT * FROM eventos_mundiais WHERE ativo = 1 AND datetime(data_inicio) <= datetime('now') AND datetime(data_fim) >= datetime('now')`, (err, rows) => {
-        if (!rows.length) return message.reply('No momento não há eventos mundiais ativos.');
+        if (!rows.length) return sendReply(message, 'No momento não há eventos mundiais ativos.');
         let txt = '🌍 *Eventos Mundiais Ativos*\n';
         rows.forEach(e => txt += `\n*${e.nome}*: ${e.descricao}\nBônus: ${e.bonus}\nVálido até ${e.data_fim}`);
-        message.reply(txt);
+        sendReply(message, txt);
     });
 }
 
-// Ranking
 async function cmdRanking(args, message, telefone) {
     let tipo = args[0] || 'forca';
     let order = '';
@@ -1336,7 +1270,7 @@ async function cmdRanking(args, message, telefone) {
     db.all(`SELECT nome, ${campo} as valor FROM players ORDER BY ${order} LIMIT 10`, (err, rows) => {
         let txt = `🏆 *Ranking de ${tipo}*\n`;
         rows.forEach((r, i) => txt += `\n${i+1}. ${r.nome} - ${r.valor}`);
-        message.reply(txt);
+        sendReply(message, txt);
     });
 }
 
@@ -1345,53 +1279,53 @@ async function cmdRanking(args, message, telefone) {
 // ========================
 
 async function cmdBanir(args, message, telefone) {
-    if (telefone !== DONO_NUMERO) return message.reply('Apenas o dono pode usar este comando.');
-    if (!args[0]) return message.reply('Uso: `/banir <id_do_jogador> [motivo]`');
+    if (telefone !== DONO_NUMERO) return sendReply(message, 'Apenas o dono pode usar este comando.');
+    if (!args[0]) return sendReply(message, 'Uso: `/banir <id_do_jogador> [motivo]`');
     const alvoUnique = args[0];
     const motivo = args.slice(1).join(' ') || 'sem motivo';
     const alvo = await getPlayerByUniqueId(alvoUnique);
-    if (!alvo) return message.reply('Jogador não encontrado.');
+    if (!alvo) return sendReply(message, 'Jogador não encontrado.');
     db.run(`UPDATE players SET banido = 1 WHERE id = ?`, [alvo.id]);
-    message.reply(`Jogador ${alvo.nome} foi banido. Motivo: ${motivo}`);
+    sendReply(message, `Jogador ${alvo.nome} foi banido. Motivo: ${motivo}`);
     client.sendMessage(alvo.telefone + '@c.us', `⚠️ Você foi banido do jogo. Motivo: ${motivo}`);
 }
 
 async function cmdDarItem(args, message, telefone) {
-    if (telefone !== DONO_NUMERO) return message.reply('Apenas o dono.');
-    if (args.length < 2) return message.reply('Uso: `/daritem <id_jogador> <id_item> <quantidade>`');
+    if (telefone !== DONO_NUMERO) return sendReply(message, 'Apenas o dono.');
+    if (args.length < 2) return sendReply(message, 'Uso: `/daritem <id_jogador> <id_item> <quantidade>`');
     const alvoUnique = args[0];
     const itemId = parseInt(args[1]);
     const qtd = parseInt(args[2]) || 1;
     const alvo = await getPlayerByUniqueId(alvoUnique);
-    if (!alvo) return message.reply('Jogador não encontrado.');
+    if (!alvo) return sendReply(message, 'Jogador não encontrado.');
     db.run(`INSERT INTO inventario (player_id, item_id, quantidade) VALUES (?, ?, ?) ON CONFLICT(player_id, item_id) DO UPDATE SET quantidade = quantidade + ?`, [alvo.id, itemId, qtd, qtd]);
-    message.reply(`Item ${itemId} x${qtd} entregue a ${alvo.nome}.`);
+    sendReply(message, `Item ${itemId} x${qtd} entregue a ${alvo.nome}.`);
 }
 
 async function cmdResetar(args, message, telefone) {
-    if (telefone !== DONO_NUMERO) return message.reply('Apenas o dono.');
-    if (!args[0]) return message.reply('Uso: `/resetar <id_jogador>`');
+    if (telefone !== DONO_NUMERO) return sendReply(message, 'Apenas o dono.');
+    if (!args[0]) return sendReply(message, 'Uso: `/resetar <id_jogador>`');
     const alvoUnique = args[0];
     const alvo = await getPlayerByUniqueId(alvoUnique);
-    if (!alvo) return message.reply('Jogador não encontrado.');
+    if (!alvo) return sendReply(message, 'Jogador não encontrado.');
     db.run(`DELETE FROM players WHERE id = ?`, [alvo.id]);
     db.run(`DELETE FROM inventario WHERE player_id = ?`, [alvo.id]);
-    message.reply(`Jogador ${alvo.nome} foi resetado.`);
+    sendReply(message, `Jogador ${alvo.nome} foi resetado.`);
 }
 
 async function cmdAnuncio(args, message, telefone) {
-    if (telefone !== DONO_NUMERO) return message.reply('Apenas o dono.');
-    if (!args.length) return message.reply('Uso: `/anuncio <texto>`');
+    if (telefone !== DONO_NUMERO) return sendReply(message, 'Apenas o dono.');
+    if (!args.length) return sendReply(message, 'Uso: `/anuncio <texto>`');
     const texto = args.join(' ');
-    // Envia para todos os jogadores cadastrados
     db.all(`SELECT telefone FROM players`, (err, rows) => {
         rows.forEach(row => {
             client.sendMessage(row.telefone + '@c.us', `📢 *ANÚNCIO GLOBAL*: ${texto}`);
         });
-        message.reply('Anúncio enviado a todos os jogadores.');
+        sendReply(message, 'Anúncio enviado a todos os jogadores.');
     });
 }
 
+// ========== PROCESSADOR DE COMANDOS ==========
 async function processCommand(message) {
     const body = message.body.slice(1).trim();
     const parts = body.split(' ');
@@ -1399,66 +1333,66 @@ async function processCommand(message) {
     const args = parts.slice(1);
     const telefone = message.from.replace('@c.us', '');
 
-const commands = {
-    'registrar': cmdRegistrar,
-    'perfil': cmdPerfil,
-    'mudaraparencia': cmdMudarAparencia,
-    'cultivar': cmdCultivar,
-    'tecnicas': cmdTecnicas,
-    'compreender': cmdCompreender,
-    'aprender': cmdAprender,
-    'inventario': cmdInventario,
-    'usar': cmdUsarItem,
-    'loja': cmdLoja,
-    'menu': cmdMenu,
-    'ajuda': cmdAjuda,
-    'descansar': cmdDescansar,
-    'changelog': cmdChangelog,
-    'andar': cmdAndar,
-    'parar': cmdParar,
-    'dominio': cmdDominio,
-    'criarseita': cmdCriarSeita,
-    'convidar': cmdConvidar,
-    'sairseita': cmdSairSeita,
-    'missoes': cmdMissoes,
-    'aceitar': cmdAceitarMissao,
-    'doar': cmdDoar,
-    'tecnicaseita': cmdTecnicaSeita,
-    'biblioteca': cmdBiblioteca,
-    'aprender_seita': cmdAprenderSeita,
-    'profissao': cmdProfissao,
-    'craftar': cmdCraftar,
-    'subirprofissao': cmdSubirProfissao,
-    'amigos': cmdAmigos,
-    'adicionaramigo': cmdAdicionarAmigo,
-    'inimigo': cmdInimigo,
-    'conversar': cmdConversar,
-    'lerchat': cmdLerChat,
-    'criarmissao': cmdCriarMissaoPessoal,
-    'minhasmissoes': cmdMinhasMissoes,
-    'missoesdisponiveis': cmdMissoesDisponiveis,
-    'aceitarmissao': cmdAceitarMissaoPessoal,
-    'completarmissao': cmdCompletarMissaoPessoal,
-    'eventos': cmdEventos,
-    'ranking': cmdRanking,
-    'banir': cmdBanir,
-    'daritem': cmdDarItem,
-    'resetar': cmdResetar,
-    'anuncio': cmdAnuncio,
-    'guia': cmdGuia,
-    'status': cmdPerfil,
-    'atributos': cmdPerfil,
-    'romper': cmdRomper,
-    'jogadores': cmdJogadores,
-    'encontrar': cmdEncontrar,
-    'trocar': cmdTrocar,
-    'duelar': cmdDuelar,
-    'mercado': cmdMercadoGlobal,
-    'npc': cmdNPCInteragir,
-    'interagir': cmdNPCInteragir
-};
+    const commands = {
+        'registrar': cmdRegistrar,
+        'perfil': cmdPerfil,
+        'mudaraparencia': cmdMudarAparencia,
+        'cultivar': cmdCultivar,
+        'tecnicas': cmdTecnicas,
+        'compreender': cmdCompreender,
+        'aprender': cmdAprender,
+        'inventario': cmdInventario,
+        'usar': cmdUsarItem,
+        'loja': cmdLoja,
+        'menu': cmdMenu,
+        'ajuda': cmdAjuda,
+        'descansar': cmdDescansar,
+        'changelog': cmdChangelog,
+        'andar': cmdAndar,
+        'parar': cmdParar,
+        'dominio': cmdDominio,
+        'criarseita': cmdCriarSeita,
+        'convidar': cmdConvidar,
+        'sairseita': cmdSairSeita,
+        'missoes': cmdMissoes,
+        'aceitar': cmdAceitarMissao,
+        'doar': cmdDoar,
+        'tecnicaseita': cmdTecnicaSeita,
+        'biblioteca': cmdBiblioteca,
+        'aprender_seita': cmdAprenderSeita,
+        'profissao': cmdProfissao,
+        'craftar': cmdCraftar,
+        'subirprofissao': cmdSubirProfissao,
+        'amigos': cmdAmigos,
+        'adicionaramigo': cmdAdicionarAmigo,
+        'inimigo': cmdInimigo,
+        'conversar': cmdConversar,
+        'lerchat': cmdLerChat,
+        'criarmissao': cmdCriarMissaoPessoal,
+        'minhasmissoes': cmdMinhasMissoes,
+        'missoesdisponiveis': cmdMissoesDisponiveis,
+        'aceitarmissao': cmdAceitarMissaoPessoal,
+        'completarmissao': cmdCompletarMissaoPessoal,
+        'eventos': cmdEventos,
+        'ranking': cmdRanking,
+        'banir': cmdBanir,
+        'daritem': cmdDarItem,
+        'resetar': cmdResetar,
+        'anuncio': cmdAnuncio,
+        'guia': cmdGuia,
+        'status': cmdPerfil,
+        'atributos': cmdPerfil,
+        'romper': cmdRomper,
+        'jogadores': cmdJogadores,
+        'encontrar': cmdEncontrar,
+        'trocar': cmdTrocar,
+        'duelar': cmdDuelar,
+        'mercado': cmdMercadoGlobal,
+        'npc': cmdNPCInteragir,
+        'interagir': cmdNPCInteragir
+    };
     if (commands[cmd]) await commands[cmd](args, message, telefone);
-    else await message.reply('Comando desconhecido. Use `/menu`.');
+    else await sendReply(message, 'Comando desconhecido. Use `/menu`.');
 }
 
 client.initialize();
