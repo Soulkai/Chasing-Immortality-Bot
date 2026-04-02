@@ -10,7 +10,7 @@ const chalk = require('chalk');
 const fs = require('fs');
 
 // ========== CONFIGURAÇÕES ==========
-const DONO_NUMERO = '120363425231463609@g.us'; // ⚠️ SUBSTITUA PELO ID/NÚMERO DO DONO
+const DONO_NUMERO = '120363425231463609'; // ⚠️ SUBSTITUA PELO ID/NÚMERO DO DONO
 const COMMAND_PREFIX = '/';
 const DB_PATH = './database.db';
 const LOG_FILE = './bot.log';
@@ -39,7 +39,9 @@ function log(message, type = 'INFO') {
     console.log(color(line));
     fs.appendFileSync(LOG_FILE, `${line}\n`);
 }
-
+// ========== CONTROLE DE REGISTRO PENDENTE ==========
+let registroPendente = new Map();
+let respostaPendente = new Map();
 // ========== FUNÇÕES AUXILIARES ==========
 function generateUniqueId() {
     return 'IM-' + Math.floor(Math.random() * 900000 + 100000);
@@ -220,6 +222,13 @@ client.on('message', async (message) => {
 
 // ========== COMANDOS ==========
 async function cmdRegistrar(args, message, telefone) {
+    // Verifica se já está registrado
+    const existing = await getPlayer(telefone);
+    if (existing) {
+        await sendReply(message, 'Você já está registrado! Use `/perfil`.');
+        return;
+    }
+
     if (args.length < 2) {
         await sendReply(message, 'Uso: `/registrar <nome> <sexo>` (sexo M/F)');
         return;
@@ -227,40 +236,29 @@ async function cmdRegistrar(args, message, telefone) {
 
     const nome = args[0];
     const sexo = String(args[1] || '').toUpperCase();
-
     if (sexo !== 'M' && sexo !== 'F') {
         await sendReply(message, 'Sexo deve ser M ou F.');
         return;
     }
 
-    const existing = await getPlayer(telefone);
-    if (existing) {
-        await sendReply(message, 'Você já está registrado! Use `/perfil`.');
-        return;
-    }
-
+    // 1. Geração aleatória de atributos
     const racas = ['Humano', 'Meio-Demônio', 'Meio-Espírito', 'Elfo da Montanha', 'Anão Guerreiro'];
-    const cla = ['Namgung', 'Tang', 'Murong', 'Wudang', 'Emei', 'Shaolin'];
+    const claOptions = ['Namgung', 'Tang', 'Murong', 'Wudang', 'Emei', 'Shaolin'];
     const raizes = ['Única Inferior', 'Única Média', 'Única Avançada', 'Única Santa', 'Dupla', 'Tripla', 'Divina', 'Imortal', 'Nenhuma'];
     const pesosRaiz = [20, 25, 20, 10, 10, 5, 3, 1, 6];
+
+    const raca = racas[Math.floor(Math.random() * racas.length)];
+    const cla = claOptions[Math.floor(Math.random() * claOptions.length)];
     const raiz = weightedRandom(raizes, pesosRaiz);
 
     let elementos = '';
     if (raiz !== 'Nenhuma') {
-        const qtd = raiz.includes('Dupla')
-            ? 2
-            : (raiz.includes('Tripla')
-                ? 3
-                : (raiz.includes('Divina')
-                    ? 4
-                    : (raiz === 'Imortal' ? 12 : 1)));
+        const qtd = raiz.includes('Dupla') ? 2 : (raiz.includes('Tripla') ? 3 : (raiz.includes('Divina') ? 4 : (raiz === 'Imortal' ? 12 : 1)));
         const lista = ['Água', 'Fogo', 'Terra', 'Ar', 'Madeira', 'Metal', 'Raio', 'Gelo', 'Luz', 'Trevas', 'Tempo', 'Espaço'];
         const sel = [];
         for (let i = 0; i < qtd; i++) {
             let e;
-            do {
-                e = lista[Math.floor(Math.random() * lista.length)];
-            } while (sel.includes(e));
+            do { e = lista[Math.floor(Math.random() * lista.length)]; } while (sel.includes(e));
             sel.push(e);
         }
         elementos = sel.join(',');
@@ -269,7 +267,7 @@ async function cmdRegistrar(args, message, telefone) {
     }
 
     const corpoDivino = (Math.random() < 0.05) ? 'Corpo de Fênix Imortal' : null;
-    const orfao = Math.random() < 0.1 ? 1 : 0;
+    const orfao = (Math.random() < 0.1) ? 1 : 0;
     const fortuna = rollDice(100);
     const forca = 10 + rollDice(10);
     const vigor = 10 + rollDice(10);
@@ -281,37 +279,134 @@ async function cmdRegistrar(args, message, telefone) {
     const qiMax = (inteligencia + espirito) * 5;
     const uniqueId = generateUniqueId();
     const localizacao = 'Vila Inicial';
-    const racaEscolhida = racas[Math.floor(Math.random() * racas.length)];
-    const clanEscolhido = cla[Math.floor(Math.random() * cla.length)];
 
-    const stmt = db.prepare(`INSERT INTO players 
-        (unique_id, nome, sexo, raca, clan, raiz_espiritual, elementos, corpo_divino, orfao, alinhamento, karma, reputacao, fortuna,
-         nivel_fisico, sub_fisico, nivel_espiritual, sub_espiritual, qi_atual, qi_maximo, hp_atual, hp_maximo,
-         forca, vigor, defesa, inteligencia, espirito, agilidade, fadiga, meridianos_abertos, profissao_principal, nivel_profissao,
-         ouro, perolas_esp, cristais_esp, essencia_imortal, localizacao, telefone, online)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?,?,?,?,?, ?,?,?, ?,?,?,?, ?,?, ?)`);
+    // 2. História inicial
+    let historia = `✨ *Sua jornada começa...*\n\n`;
+    if (orfao) {
+        historia += `Você nasceu órfão, sem saber quem eram seus pais. Desde pequeno, aprendeu a sobreviver sozinho. `;
+    } else {
+        historia += `Você nasceu em uma família humilde do clã ${cla}, que sempre prezou pela honra e pelo cultivo. `;
+    }
+    historia += `Sua raça é ${raca}. `;
+    if (raiz === 'Nenhuma') {
+        historia += `Infelizmente, você não possui raiz espiritual. O caminho do cultivo será muito mais árduo para você. `;
+    } else {
+        historia += `Sua raiz espiritual é *${raiz}* com afinidade para os elementos: ${elementos}. `;
+    }
+    if (corpoDivino) {
+        historia += `Além disso, você possui um corpo divino: *${corpoDivino}*, uma bênção raríssima! `;
+    }
+    historia += `Agora, aos 16 anos, você decide partir em busca do seu destino.`;
 
-    stmt.run(
-        uniqueId, nome, sexo, racaEscolhida, clanEscolhido, raiz, elementos, corpoDivino, orfao, 'Neutro', 0, 0, fortuna,
-        1, 1, 1, 1,
-        qiMax, qiMax, hpMax, hpMax,
-        forca, vigor, defesa, inteligencia, espirito, agilidade,
-        100, '', '', 0,
-        100, 0, 0, 0,
-        localizacao, telefone, 1,
-        async (err) => {
-            if (err) {
-                log(`Erro registro: ${err?.stack || err}`, 'ERRO');
-                await sendReply(message, 'Erro interno. Tente novamente.');
-            } else {
-                await sendReply(message, `🌟 *Bem-vindo ao Chasing Immortality, ${nome}!*\n\n📜 *ID:* ${uniqueId}\n🧬 *Raça:* ${racaEscolhida}\n🏮 *Clã:* ${clanEscolhido}\n🌿 *Raiz:* ${raiz} (${elementos})\n💪 *Corpo Divino:* ${corpoDivino || 'Nenhum'}\n❤️ *Órfão:* ${orfao ? 'Sim' : 'Não'}\n\nUse /perfil para ver detalhes. Boa sorte!`);
-            }
+    // 3. Perguntas morais
+    const perguntas = [
+        {
+            texto: "🧙 *Pergunta 1/3*: Você vê um ancião sendo atacado por bandidos. O que você faz?",
+            opcoes: [
+                { texto: "1. Intervenho para salvá-lo, mesmo correndo risco.", karma: 20, alinhamento: "Justo" },
+                { texto: "2. Observo de longe e só ajudo se ele prometer recompensa.", karma: 0, alinhamento: "Neutro" },
+                { texto: "3. Ignoro e sigo meu caminho. Não é problema meu.", karma: -15, alinhamento: "Cruel" },
+                { texto: "4. Aproveito a confusão para roubar o ancião.", karma: -30, alinhamento: "Cruel" }
+            ]
+        },
+        {
+            texto: "⚖️ *Pergunta 2/3*: Você encontra um artefato espiritual perdido. Ninguém está vendo. O que faz?",
+            opcoes: [
+                { texto: "1. Procuro o dono e devolvo.", karma: 25, alinhamento: "Justo" },
+                { texto: "2. Fico com o artefato, mas ajudo outros necessitados depois.", karma: 5, alinhamento: "Neutro" },
+                { texto: "3. Vendo para o maior comprador.", karma: -10, alinhamento: "Cruel" },
+                { texto: "4. Uso para eliminar rivais.", karma: -40, alinhamento: "Cruel" }
+            ]
+        },
+        {
+            texto: "🌿 *Pergunta 3/3*: Um discípulo mais fraco pede sua ajuda para cultivar. Você está ocupado. O que diz?",
+            opcoes: [
+                { texto: "1. Ajudo-o imediatamente, pois o dever do mais forte é guiar.", karma: 15, alinhamento: "Justo" },
+                { texto: "2. Ensino o básico rapidamente e sigo meu caminho.", karma: 5, alinhamento: "Neutro" },
+                { texto: "3. Digo que não tenho tempo e vou embora.", karma: -10, alinhamento: "Cruel" },
+                { texto: "4. Zombar dele por ser fraco.", karma: -25, alinhamento: "Cruel" }
+            ]
         }
-    );
+    ];
 
-    stmt.finalize();
+    // Armazena estado do registro
+    const dadosRegistro = {
+        nome, sexo, raca, cla, raiz, elementos, corpoDivino, orfao, uniqueId,
+        historia,
+        perguntaAtual: 0,
+        karmaTotal: 0,
+        forca, vigor, defesa, inteligencia, espirito, agilidade, hpMax, qiMax, fortuna, localizacao
+    };
+    registroPendente.set(telefone, dadosRegistro);
+
+    // Função para enviar a próxima pergunta ou finalizar
+    async function enviarProximaPergunta(chatId, dados) {
+        if (dados.perguntaAtual >= perguntas.length) {
+            // Finaliza o registro
+            let alinhamentoFinal = 'Neutro';
+            if (dados.karmaTotal >= 30) alinhamentoFinal = 'Justo';
+            else if (dados.karmaTotal <= -20) alinhamentoFinal = 'Cruel';
+
+            const stmt = db.prepare(`INSERT INTO players 
+                (unique_id, nome, sexo, raca, clan, raiz_espiritual, elementos, corpo_divino, orfao, alinhamento, karma, reputacao, fortuna,
+                 nivel_fisico, sub_fisico, nivel_espiritual, sub_espiritual, qi_atual, qi_maximo, hp_atual, hp_maximo,
+                 forca, vigor, defesa, inteligencia, espirito, agilidade, fadiga, meridianos_abertos, profissao_principal, nivel_profissao,
+                 ouro, perolas_esp, cristais_esp, essencia_imortal, localizacao, telefone, online)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?,?,?,?,?, ?,?,?, ?,?,?,?, ?,?, ?)`);
+
+            stmt.run(
+                dados.uniqueId, dados.nome, dados.sexo, dados.raca, dados.cla, dados.raiz, dados.elementos, dados.corpoDivino, dados.orfao,
+                alinhamentoFinal, dados.karmaTotal, 0, dados.fortuna,
+                1, 1, 1, 1,
+                dados.qiMax, dados.qiMax, dados.hpMax, dados.hpMax,
+                dados.forca, dados.vigor, dados.defesa, dados.inteligencia, dados.espirito, dados.agilidade,
+                100, '', '', 0,
+                100, 0, 0, 0,
+                dados.localizacao, telefone, 1,
+                (err) => {
+                    if (err) {
+                        log(`Erro registro: ${err?.stack || err}`, 'ERRO');
+                        client.sendMessage(chatId, '❌ Erro interno. Tente novamente.');
+                    } else {
+                        let resumo = `🌟 *Bem-vindo ao Chasing Immortality, ${dados.nome}!*\n\n`;
+                        resumo += `📜 *ID:* ${dados.uniqueId}\n`;
+                        resumo += `🧬 *Raça:* ${dados.raca}\n`;
+                        resumo += `🏮 *Clã:* ${dados.cla}\n`;
+                        resumo += `🌿 *Raiz:* ${dados.raiz} (${dados.elementos})\n`;
+                        if (dados.corpoDivino) resumo += `💪 *Corpo Divino:* ${dados.corpoDivino}\n`;
+                        resumo += `❤️ *Órfão:* ${dados.orfao ? 'Sim' : 'Não'}\n`;
+                        resumo += `⚖️ *Alinhamento:* ${alinhamentoFinal}\n`;
+                        resumo += `📊 *Karma:* ${dados.karmaTotal}\n\n`;
+                        resumo += `${dados.historia}\n\n`;
+                        resumo += `Use /perfil para ver seus atributos. Boa sorte, cultivador!`;
+                        client.sendMessage(chatId, resumo);
+                    }
+                    registroPendente.delete(telefone);
+                    respostaPendente.delete(telefone);
+                }
+            );
+            stmt.finalize();
+        } else {
+            const pergunta = perguntas[dados.perguntaAtual];
+            let msg = pergunta.texto + "\n\n";
+            pergunta.opcoes.forEach(op => { msg += `${op.texto}\n`; });
+            msg += "\nResponda com o número da sua escolha (ex: 1).";
+            await client.sendMessage(chatId, msg);
+        }
+    }
+
+    // Envia a história e a primeira pergunta
+    await client.sendMessage(message.from, dadosRegistro.historia);
+    await enviarProximaPergunta(message.from, dadosRegistro);
+
+    // Configura resposta pendente
+    respostaPendente.set(telefone, {
+        tipo: 'registro',
+        dados: dadosRegistro,
+        perguntas: perguntas,
+        enviarProxima: enviarProximaPergunta
+    });
 }
-
 async function cmdPerfil(_args, message, telefone) {
     const player = await ensurePlayerExists(telefone, message);
     if (!player) return;
@@ -2102,6 +2197,26 @@ async function processCommand(message) {
             return;
         }
 
+        // ========== VERIFICAÇÃO DE RESPOSTA PENDENTE (ex: perguntas do registro) ==========
+        if (respostaPendente && respostaPendente.has(telefone)) {
+            const pendente = respostaPendente.get(telefone);
+            if (pendente.tipo === 'registro') {
+                const escolha = parseInt(cmd); // O usuário responde apenas com o número, sem "/"
+                if (isNaN(escolha) || escolha < 1 || escolha > 4) {
+                    await sendReply(message, 'Resposta inválida. Digite o número da opção (1 a 4).');
+                    return;
+                }
+                const perguntaIndex = pendente.dados.perguntaAtual;
+                const pergunta = pendente.perguntas[perguntaIndex];
+                const opcao = pergunta.opcoes[escolha - 1];
+                pendente.dados.karmaTotal += opcao.karma;
+                pendente.dados.perguntaAtual++;
+                await pendente.enviarProxima(message.from, pendente.dados);
+                return;
+            }
+        }
+        // ========== FIM DA VERIFICAÇÃO ==========
+
         const commands = {
             registrar: cmdRegistrar,
             perfil: cmdPerfil,
@@ -2177,5 +2292,3 @@ async function processCommand(message) {
         await sendReply(message, 'Ocorreu um erro ao processar seu comando.');
     }
 }
-
-client.initialize();
