@@ -19,9 +19,51 @@ const MENU_SPLIT_SIZE = 2000;
 // ========== INICIALIZAÇÃO DO BANCO ==========
 const db = new sqlite3.Database(DB_PATH);
 const initSQL = fs.readFileSync('./init.sql', 'utf8');
-db.exec(initSQL, (err) => {
+
+function runExec(sql) {
+    return new Promise((resolve, reject) => {
+        db.exec(sql, (err) => {
+            if (err) reject(err);
+            else resolve();
+        });
+    });
+}
+
+async function applyMigrations() {
+    const migrations = [
+        `ALTER TABLE players ADD COLUMN banido INTEGER DEFAULT 0`,
+        `ALTER TABLE missoes_pessoais ADD COLUMN aceita_por INTEGER`,
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_inventario_player_item ON inventario(player_id, item_id)`,
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_tecnicas_player_tecnica ON tecnicas_aprendidas(player_id, tecnica_id)`,
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_profissoes_player ON profissoes(player_id)`,
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_seita_membros_unique ON seita_membros(seita_id, player_id)`,
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_biblioteca_seita_unique ON biblioteca_seita(seita_id, tecnica_id)`,
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_amigos_inimigos_unique ON amigos_inimigos(player_id, alvo_id, tipo)`,
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_loja_rpg_item_moeda_unique ON loja_rpg(item_id, moeda_tipo)`
+    ];
+
+    for (const sql of migrations) {
+        try {
+            await runExec(sql);
+        } catch (err) {
+            const msg = String(err?.message || err || '');
+            if (!msg.includes('duplicate column name')) {
+                log(`Migração ignorada com aviso: ${msg}`, 'INFO');
+            }
+        }
+    }
+}
+
+db.exec(initSQL, async (err) => {
     if (err) console.error(chalk.red('Erro ao criar tabelas:', err));
     else console.log(chalk.green('Banco de dados inicializado.'));
+
+    try {
+        await applyMigrations();
+        console.log(chalk.green('Migrações aplicadas/verificadas.'));
+    } catch (migrationErr) {
+        console.error(chalk.red('Erro ao aplicar migrações:', migrationErr));
+    }
 });
 
 // ========== FUNÇÕES DE LOG ==========
@@ -209,10 +251,46 @@ client.on('qr', (qr) => {
 
 client.on('ready', () => log('Bot conectado com sucesso!', 'SUCESSO'));
 
+async function handlePendingResponse(message) {
+    const telefone = getSenderId(message);
+    if (!telefone || !respostaPendente.has(telefone)) return false;
+
+    const pendente = respostaPendente.get(telefone);
+    if (!pendente || pendente.tipo !== 'registro') return false;
+
+    const rawBody = typeof message?.body === 'string' ? message.body.trim() : '';
+    const rawChoice = rawBody.startsWith(COMMAND_PREFIX)
+        ? rawBody.slice(COMMAND_PREFIX.length).trim()
+        : rawBody;
+
+    const escolha = parseInt(rawChoice, 10);
+    if (Number.isNaN(escolha) || escolha < 1 || escolha > 4) {
+        await sendReply(message, 'Resposta inválida. Digite apenas o número da opção (1 a 4).');
+        return true;
+    }
+
+    const perguntaIndex = pendente.dados.perguntaAtual;
+    const pergunta = pendente.perguntas[perguntaIndex];
+    if (!pergunta) {
+        respostaPendente.delete(telefone);
+        return true;
+    }
+
+    const opcao = pergunta.opcoes[escolha - 1];
+    pendente.dados.karmaTotal += opcao.karma;
+    pendente.dados.perguntaAtual++;
+    await pendente.enviarProxima(getChatId(message), pendente.dados);
+    return true;
+}
+
 client.on('message', async (message) => {
     try {
         const body = typeof message?.body === 'string' ? message.body.trim() : '';
-        if (!body || !body.startsWith(COMMAND_PREFIX)) return;
+        if (!body) return;
+
+        if (await handlePendingResponse(message)) return;
+
+        if (!body.startsWith(COMMAND_PREFIX)) return;
         log(`Comando de ${getSenderId(message) || message.from}: ${body}`, 'RECV');
         await processCommand(message);
     } catch (err) {
@@ -1489,7 +1567,7 @@ async function cmdCompletarMissao(args, message, telefone) {
         return;
     }
 
-    db.get(`SELECT * FROM missoes_pessoais WHERE id = ? AND status = 'em_andamento' AND criador_id != ?`, [missaoId, player.id], async (_err, missaoPessoal) => {
+    db.get(`SELECT * FROM missoes_pessoais WHERE id = ? AND status = 'em_andamento' AND criador_id != ? AND aceita_por = ?`, [missaoId, player.id, player.id], async (_err, missaoPessoal) => {
         if (missaoPessoal) {
             await updatePlayer(player.id, 'ouro', player.ouro + missaoPessoal.recompensa_moeda);
             db.run(`UPDATE missoes_pessoais SET status = 'concluida' WHERE id = ?`, [missaoId]);
@@ -1994,7 +2072,7 @@ async function cmdAceitarMissaoPessoal(args, message, telefone) {
         return;
     }
 
-    db.run(`UPDATE missoes_pessoais SET status = 'em_andamento' WHERE id = ? AND status = 'aberta'`, [missaoId], async function onUpdate(err) {
+    db.run(`UPDATE missoes_pessoais SET status = 'em_andamento', aceita_por = ? WHERE id = ? AND status = 'aberta'`, [player.id, missaoId], async function onUpdate(err) {
         if (err || this.changes === 0) await sendReply(message, 'Missão não disponível.');
         else await sendReply(message, 'Missão aceita! Complete o objetivo e use `/completarmissao <id>` quando terminar.');
     });
@@ -2197,25 +2275,12 @@ async function processCommand(message) {
             return;
         }
 
-        // ========== VERIFICAÇÃO DE RESPOSTA PENDENTE (ex: perguntas do registro) ==========
-        if (respostaPendente && respostaPendente.has(telefone)) {
-            const pendente = respostaPendente.get(telefone);
-            if (pendente.tipo === 'registro') {
-                const escolha = parseInt(cmd); // O usuário responde apenas com o número, sem "/"
-                if (isNaN(escolha) || escolha < 1 || escolha > 4) {
-                    await sendReply(message, 'Resposta inválida. Digite o número da opção (1 a 4).');
-                    return;
-                }
-                const perguntaIndex = pendente.dados.perguntaAtual;
-                const pergunta = pendente.perguntas[perguntaIndex];
-                const opcao = pergunta.opcoes[escolha - 1];
-                pendente.dados.karmaTotal += opcao.karma;
-                pendente.dados.perguntaAtual++;
-                await pendente.enviarProxima(message.from, pendente.dados);
-                return;
-            }
+        const existingPlayer = await getPlayer(telefone);
+        if (existingPlayer?.banido && !isOwner(message, telefone)) {
+            await sendReply(message, '🚫 Seu acesso ao jogo está bloqueado.');
+            return;
         }
-        // ========== FIM DA VERIFICAÇÃO ==========
+
 
         const commands = {
             registrar: cmdRegistrar,
@@ -2292,4 +2357,24 @@ async function processCommand(message) {
         await sendReply(message, 'Ocorreu um erro ao processar seu comando.');
     }
 }
+
+
+async function shutdown(signal) {
+    try {
+        log(`Encerrando bot (${signal})...`, 'INFO');
+        await client.destroy().catch(() => {});
+        db.close();
+    } finally {
+        process.exit(0);
+    }
+}
+
+process.on('SIGINT', () => {
+    shutdown('SIGINT');
+});
+
+process.on('SIGTERM', () => {
+    shutdown('SIGTERM');
+});
+
 client.initialize();

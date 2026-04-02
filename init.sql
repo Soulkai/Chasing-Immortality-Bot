@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS players (
     avatar_url TEXT,
     telefone TEXT UNIQUE,
     online INTEGER,
+    banido INTEGER DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -166,6 +167,7 @@ CREATE TABLE IF NOT EXISTS missoes_pessoais (
     item_necessario_id INTEGER,
     quantidade_necessaria INTEGER,
     status TEXT,
+    aceita_por INTEGER,
     FOREIGN KEY(criador_id) REFERENCES players(id)
 );
 
@@ -278,3 +280,13 @@ INSERT OR IGNORE INTO loja_rpg (item_id, moeda_tipo, preco) VALUES
 -- Inserir changelog inicial
 INSERT OR IGNORE INTO changelog (versao, data, texto) VALUES
 ('v1.0.0', date('now'), 'Lançamento oficial do Chasing Immortality. Sistemas: registro, cultivo, combate, seitas, mercado, NPCs, eventos.');
+
+
+-- Índices e restrições auxiliares
+CREATE UNIQUE INDEX IF NOT EXISTS idx_inventario_player_item ON inventario(player_id, item_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tecnicas_player_tecnica ON tecnicas_aprendidas(player_id, tecnica_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_profissoes_player ON profissoes(player_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_seita_membros_unique ON seita_membros(seita_id, player_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_biblioteca_seita_unique ON biblioteca_seita(seita_id, tecnica_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_amigos_inimigos_unique ON amigos_inimigos(player_id, alvo_id, tipo);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_loja_rpg_item_moeda_unique ON loja_rpg(item_id, moeda_tipo);

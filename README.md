@@ -1,4 +1,3 @@
-markdown
 # 🧘‍♂️ Chasing Immortality – Bot de WhatsApp (Wuxia/Xianxia RPG)
 
 > Um jogo de imortalidade, cultivação e aventura, diretamente no seu WhatsApp!
@@ -90,6 +89,8 @@ O bot estará online e responderá aos comandos enviados de qualquer contato reg
 
 Todos os comandos começam com `/`. Use `/menu` para ver a lista completa.
 
+> Durante o cadastro guiado, as respostas das perguntas morais podem ser enviadas apenas com `1`, `2`, `3` ou `4`, sem precisar usar `/`.
+
 | Comando | Descrição |
 |---------|------------|
 | `/registrar <nome> <M/F>` | Cria seu personagem (nome e sexo). |
@@ -97,7 +98,7 @@ Todos os comandos começam com `/`. Use `/menu` para ver a lista completa.
 | `/cultivar [fisico|espiritual]` | Treina cultivo (requer técnica de meditação). |
 | `/andar` | Explora a região atual (eventos a cada 5 min). |
 | `/inventario` | Lista itens que você possui. |
-| `/usar <id_item>` | Usa um item (poção, pílula, etc.). |
+| `/usar <id_item>` ou `/usaritem <id_item>` | Usa um item (poção, pílula, etc.). |
 | `/equipar <id_item>` | Equipa arma/armadura/artefato. |
 | `/loja` | Compra/vende itens da loja do jogo. |
 | `/mercado` | Mercado entre jogadores. |

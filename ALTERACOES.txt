@@ -1,0 +1,25 @@
+Principais correções aplicadas
+
+1. bot.js
+- Restaurado client.initialize() no final do arquivo.
+- Adicionado encerramento gracioso com SIGINT/SIGTERM.
+- Corrigido fluxo de cadastro guiado: respostas 1-4 agora funcionam sem prefixo.
+- Mantida compatibilidade para responder /1, /2 etc.
+- Adicionada verificação de jogador banido antes de processar comandos.
+- Adicionadas migrações automáticas para bancos já existentes.
+- Criados índices únicos necessários para ON CONFLICT funcionar no inventário e outras tabelas auxiliares.
+- Ajustado fluxo de missões pessoais para registrar quem aceitou (aceita_por).
+
+2. init.sql
+- Adicionada coluna banido em players.
+- Adicionada coluna aceita_por em missoes_pessoais.
+- Adicionados índices únicos para inventário, técnicas, profissões, seita_membros, biblioteca_seita, amigos_inimigos e loja.
+
+3. package.json
+- Corrigido JSON.
+- Adicionado script npm run check.
+- Adicionada exigência de Node.js >= 18.
+
+4. start.bat / backup.bat
+- Tornados mais estáveis ao executar a partir da pasta do projeto.
+- Melhorado backup com timestamp via PowerShell.
