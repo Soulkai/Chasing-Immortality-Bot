@@ -1,8 +1,4 @@
-Aqui está um `README.md` completo para o repositório do seu bot no GitHub.
-
----
-
-```markdown
+markdown
 # 🧘‍♂️ Chasing Immortality – Bot de WhatsApp (Wuxia/Xianxia RPG)
 
 > Um jogo de imortalidade, cultivação e aventura, diretamente no seu WhatsApp!
