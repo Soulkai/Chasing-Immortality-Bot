@@ -194,9 +194,181 @@ async function cmdMudarAparencia(args, message, telefone) {
     await updatePlayer(player.id, 'avatar_url', args[0]);
     message.reply('🧝 Avatar atualizado! Aparecerá no /perfil.');
 }
-
 function cmdMenu(message) {
-    message.reply(`📋 *MENU DE COMANDOS*\n👤 *Registro*: /registrar, /perfil, /ranking\n🧘 *Cultivo*: /cultivar, /tecnicas, /compreender, /aprender, /usartecnica\n⚔️ *Combate*: /atacar, /defender, /usaritem, /fugir\n🌍 *Exploração*: /andar, /parar, /dominio\n🎒 *Itens*: /inventario, /usar, /equipar, /loja, /vender, /drop, /mercado\n🏛️ *Seitas*: /criarseita, /convidar, /sairseita, /missoes, /aceitar, /doar, /tecnicaseita, /biblioteca\n💼 *Profissões*: /profissao, /craftar, /subirprofissao\n👥 *Social*: /amigos, /adicionaramigo, /inimigo, /conversar, /lerchat\n🧩 *Missões*: /criarmissao, /minhasmissoes, /missoesdisponiveis, /aceitarmissao, /completarmissao\n🎲 *Outros*: /descansar, /eventos, /changelog, /menu, /ajuda, /mudaraparencia`);
+    const agora = new Date();
+    const dataStr = agora.toLocaleDateString('pt-BR');
+    const horaStr = agora.toLocaleTimeString('pt-BR');
+    const versao = '0.0.1';
+    
+    let menu = `╭━━⪩ BEM VINDO! ⪨━━\n`;
+    menu += `▢\n`;
+    menu += `▢ • Chasing Immortality\n`;
+    menu += `▢ • Data: ${dataStr}\n`;
+    menu += `▢ • Hora: ${horaStr}\n`;
+    menu += `▢ • Prefixos: /\n`;
+    menu += `▢ • Versão: ${versao}\n`;
+    menu += `▢\n`;
+    menu += `╰━━─「🪐」─━━\n\n`;
+    
+    menu += `╭━━⪩ 🎯 PRINCIPAL ⪨━━\n`;
+    menu += `▢\n`;
+    menu += `▢ • /registrar <nome> <M/F> - Registra seu cultivador\n`;
+    menu += `▢ • /perfil - Mostra sua identidade e progresso\n`;
+    menu += `▢ • /status - Mostra recursos e condição atual (mesmo que /perfil)\n`;
+    menu += `▢ • /atributos - Exibe seus atributos principais (mesmo que /perfil)\n`;
+    menu += `▢ • /inventario - Lista seus itens atuais\n`;
+    menu += `▢\n`;
+    menu += `╰━━─「🎯」─━━\n\n`;
+    
+    menu += `╭━━⪩ ☯️ CULTIVO ⪨━━\n`;
+    menu += `▢\n`;
+    menu += `▢ • /cultivar [fisico|espiritual] - Cultiva uma trilha\n`;
+    menu += `▢ • /romper - Tenta avançar de reino (desafio de tribulação)\n`;
+    menu += `▢ • /tecnicas - Lista técnicas conhecidas\n`;
+    menu += `▢ • /compreender <id> - Estuda uma técnica para ganhar compreensão\n`;
+    menu += `▢ • /aprender <id> - Tenta aprender uma técnica (50%+ compreensão)\n`;
+    menu += `▢ • /guia cultivo - Explica o sistema de cultivo\n`;
+    menu += `▢\n`;
+    menu += `╰━━─「☯️」─━━\n\n`;
+    
+    menu += `╭━━⪩ 🧭 MUNDO ⪨━━\n`;
+    menu += `▢\n`;
+    menu += `▢ • /andar [região] - Viaja para uma região e explora (eventos a cada 5 min)\n`;
+    menu += `▢ • /parar - Para de explorar e retorna à vila\n`;
+    menu += `▢ • /dominio <nome> - Entra em uma masmorra/domínio (em breve)\n`;
+    menu += `▢ • /eventos - Mostra eventos mundiais ativos\n`;
+    menu += `▢ • /ranking [forca|reino|riqueza|karma] - Classificações\n`;
+    menu += `▢\n`;
+    menu += `╰━━─「🧭」─━━\n\n`;
+    
+    menu += `╭━━⪩ ⚔️ BATALHA ⪨━━\n`;
+    menu += `▢\n`;
+    menu += `▢ • /atacar - Executa um ataque básico (em combate)\n`;
+    menu += `▢ • /defender - Assume postura defensiva (em combate)\n`;
+    menu += `▢ • /usaritem <id> - Usa item em combate\n`;
+    menu += `▢ • /usartecnica <id> - Usa técnica ofensiva/defensiva (em combate)\n`;
+    menu += `▢ • /fugir - Tenta escapar do confronto (em combate)\n`;
+    menu += `▢ • /guia batalha - Explica o combate\n`;
+    menu += `▢\n`;
+    menu += `╰━━─「⚔️」─━━\n\n`;
+    
+    menu += `╭━━⪩ 🔄 SOCIAL ⪨━━\n`;
+    menu += `▢\n`;
+    menu += `▢ • /jogadores - Lista cultivadores próximos (em breve)\n`;
+    menu += `▢ • /encontrar - Verifica encontro com outro player (via /andar)\n`;
+    menu += `▢ • /conversar <id> <msg> - Fala com o jogador encontrado ou envia mensagem privada\n`;
+    menu += `▢ • /trocar - Troca itens com o jogador encontrado (em breve)\n`;
+    menu += `▢ • /duelar - Inicia um duelo PvP (via encontro)\n`;
+    menu += `▢ • /amigos - Lista seus amigos\n`;
+    menu += `▢ • /adicionaramigo <id> - Adiciona um amigo\n`;
+    menu += `▢ • /inimigo <id> - Declara inimizade\n`;
+    menu += `▢ • /lerchat - Lê mensagens não lidas\n`;
+    menu += `▢\n`;
+    menu += `╰━━─「🔄」─━━\n\n`;
+    
+    menu += `╭━━⪩ 🏪 ECONOMIA ⪨━━\n`;
+    menu += `▢\n`;
+    menu += `▢ • /loja - Lista itens da loja do bot\n`;
+    menu += `▢ • /loja comprar <id> - Compra um item\n`;
+    menu += `▢ • /loja vender <id> - Vende item para NPC mercador\n`;
+    menu += `▢ • /mercado - Mercado global entre jogadores (em breve)\n`;
+    menu += `▢ • /profissao [listar|escolher] - Mostra ou escolhe sua profissão\n`;
+    menu += `▢ • /craftar <item> - Fabricar item (depende da profissão)\n`;
+    menu += `▢ • /guia profissao - Explica profissões\n`;
+    menu += `▢\n`;
+    menu += `╰━━─「🏪」─━━\n\n`;
+    
+    menu += `╭━━⪩ 📋 MISSÕES ⪨━━\n`;
+    menu += `▢\n`;
+    menu += `▢ • /missoes - Mostra missões da seita disponíveis\n`;
+    menu += `▢ • /aceitar <id_missao> - Aceita uma missão da seita\n`;
+    menu += `▢ • /completarmissao <id> - Resgata recompensa da missão (seita ou pessoal)\n`;
+    menu += `▢ • /criarmissao <desc> <recompensa> - Cria missão pessoal para outros\n`;
+    menu += `▢ • /missoesdisponiveis - Lista missões criadas por outros jogadores\n`;
+    menu += `▢ • /minhasmissoes - Lista missões que você criou\n`;
+    menu += `▢ • /npc interagir - Aceita missão ou interação de NPC (via /andar)\n`;
+    menu += `▢\n`;
+    menu += `╰━━─「📋」─━━\n\n`;
+    
+    menu += `╭━━⪩ 🏯 SEITAS ⪨━━\n`;
+    menu += `▢\n`;
+    menu += `▢ • /criarseita <nome> <desc> - Cria sua própria seita (custo 1000 ouro ou 1 cristal)\n`;
+    menu += `▢ • /convidar <id> - Convida alguém para sua seita\n`;
+    menu += `▢ • /sairseita - Sai da seita atual\n`;
+    menu += `▢ • /doar <quantidade> - Doa ouro para o tesouro da seita\n`;
+    menu += `▢ • /tecnicaseita <id_tecnica> - Adiciona técnica à biblioteca da seita (líder)\n`;
+    menu += `▢ • /biblioteca - Lista técnicas disponíveis na seita\n`;
+    menu += `▢ • /aprender_seita <id> - Aprende técnica da biblioteca da seita\n`;
+    menu += `▢\n`;
+    menu += `╰━━─「🏯」─━━\n\n`;
+    
+    menu += `╭━━⪩ ℹ️ INFORMAÇÕES ⪨━━\n`;
+    menu += `▢\n`;
+    menu += `▢ • /changelog - Últimas atualizações do bot\n`;
+    menu += `▢ • /mudaraparencia <URL> - Define sua imagem de perfil\n`;
+    menu += `▢ • /guia [social|batalha|cultivo|profissao] - Explica sistemas\n`;
+    menu += `▢ • /ajuda <comando> - Ajuda detalhada de um comando\n`;
+    menu += `▢ • /descansar - Recupera fadiga e Qi\n`;
+    menu += `▢\n`;
+    menu += `╰━━─「ℹ️」─━━\n\n`;
+    
+    menu += `╭━━⪩ FIM ⪨━━\n`;
+    menu += `▢\n`;
+    menu += `▢ • Use os comandos com sabedoria!\n`;
+    menu += `▢ • Dica: /perfil para ver seu estado completo.\n`;
+    menu += `▢\n`;
+    menu += `╰━━─「🎮」─━━`;
+    
+    message.reply(menu);
+}
+
+async function cmdGuia(args, message) {
+    if (!args.length) {
+        message.reply(`📖 *Guias disponíveis:*\n/guia cultivo\n/guia batalha\n/guia profissao\n/guia social\n\nUse /guia <assunto> para detalhes.`);
+        return;
+    }
+    const assunto = args[0].toLowerCase();
+    let texto = '';
+    switch (assunto) {
+        case 'cultivo':
+            texto = `🌿 *Guia de Cultivo*\n\n` +
+                `O cultivo é dividido em dois caminhos: *Físico* (aumenta Força, Vigor, HP) e *Espiritual* (aumenta Inteligência, Espírito, Qi).\n` +
+                `Para cultivar, você precisa de uma técnica de meditação (geralmente recebida do seu clã).\n` +
+                `Use /cultivar [fisico|espiritual] – consome Qi e Fadiga. Ganhe XP para subir de subnível (1 a 9).\n` +
+                `Ao atingir subnível 9 com XP suficiente, você enfrentará a *Tribulação do Céu* – um combate desafiador para avançar de reino.\n` +
+                `Cada reino aumenta significativamente seus atributos e desbloqueia novas técnicas.`;
+            break;
+        case 'batalha':
+            texto = `⚔️ *Guia de Combate*\n\n` +
+                `O combate é por turnos. Você pode:\n` +
+                `• /atacar – causa dano baseado na Força e arma equipada.\n` +
+                `• /defender – reduz o dano recebido pela metade no próximo turno.\n` +
+                `• /usaritem <id> – consome um item do inventário (poções, pílulas).\n` +
+                `• /usartecnica <id> – usa uma técnica ofensiva ou defensiva que você aprendeu.\n` +
+                `• /fugir – tenta escapar (chance baseada na Agilidade).\n\n` +
+                `Quando um monstro ou jogador é derrotado, você ganha recompensas (ouro, XP, drops).`;
+            break;
+        case 'profissao':
+            texto = `🛠️ *Guia de Profissões*\n\n` +
+                `Escolha uma profissão com /profissao escolher <nome>.\n` +
+                `Opções: Alquimista, Forjador, Médico, Mestre de Talismã, Mestre de Formações.\n` +
+                `Cada profissão permite craftar itens específicos com /craftar.\n` +
+                `Ganhe XP craftando e suba de nível para desbloquear receitas mais poderosas.\n` +
+                `Use /subirprofissao para evoluir de nível quando tiver XP suficiente.`;
+            break;
+        case 'social':
+            texto = `👥 *Guia Social*\n\n` +
+                `• /amigos – vê sua lista de amigos.\n` +
+                `• /adicionaramigo <id> – envia pedido de amizade.\n` +
+                `• /inimigo <id> – declara alguém como inimigo (afeta encontros PvP e karma).\n` +
+                `• /conversar <id> <msg> – envia mensagem privada.\n` +
+                `• /lerchat – lê mensagens não lidas.\n` +
+                `• Quando dois jogadores usam /andar na mesma região, podem se encontrar e interagir (batalha, troca, conversa).`;
+            break;
+        default:
+            texto = `Assunto não encontrado. Use /guia sem argumentos para ver a lista.`;
+    }
+    message.reply(texto);
 }
 
 function cmdAjuda(args, message) {
@@ -229,6 +401,34 @@ async function cmdChangelog(message) {
         rows.forEach(r => { text += `\n*${r.versao}* (${r.data}): ${r.texto}`; });
         message.reply(text);
     });
+}
+
+async function cmdRomper(args, message, telefone) {
+    const player = await ensurePlayerExists(telefone, message);
+    if (!player) return;
+    // Verifica se está no subnível 9 de algum dos cultivos
+    if (player.sub_fisico === 9 || player.sub_espiritual === 9) {
+        message.reply(`⚡ O céu escurece... Você sente a Tribulação do Céu se aproximar!\nPara avançar de reino, você precisa enfrentar um desafio. Use /cultivar novamente para iniciar a tribulação.`);
+        // Aqui poderia iniciar uma batalha especial, mas por enquanto apenas avisa
+    } else {
+        message.reply(`Você ainda não atingiu o pico do seu reino atual. Continue cultivando para chegar ao subnível 9.`);
+    }
+}
+
+async function cmdJogadores(args, message, telefone) {
+    message.reply(`👥 *Jogadores próximos*\nFuncionalidade em desenvolvimento. Use /ranking para ver a lista geral.`);
+}
+async function cmdEncontrar(args, message, telefone) {
+    message.reply(`🔍 *Encontrar jogadores*\nUse /andar em uma região e aguarde eventos. Quando outro jogador também estiver explorando, vocês poderão se encontrar.`);
+}
+async function cmdTrocar(args, message, telefone) {
+    message.reply(`🔄 *Troca de itens*\nEm breve! Por enquanto, use /mercado para vender/comprar itens.`);
+}
+async function cmdDuelar(args, message, telefone) {
+    message.reply(`⚔️ *Duelo PvP*\nPara duelar, ambos os jogadores devem estar na mesma região e usar /batalhar quando se encontrarem. Em desenvolvimento.`);
+}
+async function cmdMercadoGlobal(args, message, telefone) {
+    message.reply(`🏪 *Mercado Global*\nEm desenvolvimento. Use /loja para comprar itens básicos.`);
 }
 
 async function cmdCultivar(args, message, telefone) {
@@ -1056,6 +1256,15 @@ async function processCommand(message) {
         'completarmissao': cmdCompletarMissaoPessoal,
         'eventos': cmdEventos, 'ranking': cmdRanking,
         'banir': cmdBanir, 'daritem': cmdDarItem, 'resetar': cmdResetar, 'anuncio': cmdAnuncio
+		'guia': cmdGuia,
+		'status': cmdPerfil,      // alias
+		'atributos': cmdPerfil,   // alias
+		'romper': cmdRomper,
+		'jogadores': cmdJogadores,
+		'encontrar': cmdEncontrar,
+		'trocar': cmdTrocar,
+		'duelar': cmdDuelar,
+		'mercado': cmdMercadoGlobal,
     };
     if (commands[cmd]) await commands[cmd](args, message, telefone);
     else await message.reply('Comando desconhecido. Use `/menu`.');
