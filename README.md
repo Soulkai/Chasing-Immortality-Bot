@@ -48,8 +48,8 @@ markdown
 ### 1. Clone o repositório
 
 ```bash
-git clone https://github.com/seu-usuario/chasing-immortality.git
-cd chasing-immortality
+git clone https://github.com/Soulkai/Chasing-Immortality-Bot.git
+cd Chasing-Immortality-Bot
 ```
 
 ### 2. Instale as dependências
