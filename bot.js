@@ -10,7 +10,7 @@ const fs = require('fs');
 const path = require('path');
 
 // ========== CONFIGURAÇÕES ==========
-const DONO_NUMERO = '5521997537769';   // ⚠️ SUBSTITUA PELO SEU NÚMERO (com código do país)
+const DONO_NUMERO = ' 120363425231463609';   // ⚠️ SUBSTITUA PELO SEU NÚMERO (com código do país)
 const COMMAND_PREFIX = '/';
 const DB_PATH = './database.db';
 const LOG_FILE = './bot.log';
