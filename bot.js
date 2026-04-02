@@ -177,12 +177,20 @@ async function cmdRegistrar(args, message, telefone) {
          nivel_fisico, sub_fisico, nivel_espiritual, sub_espiritual, qi_atual, qi_maximo, hp_atual, hp_maximo,
          forca, vigor, defesa, inteligencia, espirito, agilidade, fadiga, meridianos_abertos, profissao_principal, nivel_profissao,
          ouro, perolas_esp, cristais_esp, essencia_imortal, localizacao, telefone, online)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, 1,1,1,1, ?, ?, ?, ?, ?,?,?,?,?,?,?, 100, '', '',0, ?,0,0,0, ?, ?, 1)`);
-    stmt.run(unique_id, nome, sexo, racaEscolhida, clanEscolhido, raiz, elementos, corpoDivino, orfao, 'Neutro', 0, 0, fortuna,
-        qi_max, qi_max, hp_max, hp_max, forca, vigor, defesa, inteligencia, espirito, agilidade,
-        100, '', '', 0, 100, localizacao, telefone, (err) => {
-            if (err) { log(`Erro registro: ${err}`, 'ERRO'); sendReply(message, 'Erro interno. Tente novamente.'); }
-            else {
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?,?,?,?,?, ?,?,?, ?,?,?,?, ?,?, ?)`);
+    stmt.run(
+        unique_id, nome, sexo, racaEscolhida, clanEscolhido, raiz, elementos, corpoDivino, orfao, 'Neutro', 0, 0, fortuna,
+        1, 1, 1, 1,
+        qi_max, qi_max, hp_max, hp_max,
+        forca, vigor, defesa, inteligencia, espirito, agilidade,
+        100, '', '', 0,
+        100, 0, 0, 0,
+        localizacao, telefone, 1,
+        (err) => {
+            if (err) { 
+                log(`Erro registro: ${err}`, 'ERRO'); 
+                sendReply(message, 'Erro interno. Tente novamente.'); 
+            } else {
                 sendReply(message, `🌟 *Bem-vindo ao Chasing Immortality, ${nome}!*\n\n📜 *ID:* ${unique_id}\n🧬 *Raça:* ${racaEscolhida}\n🏮 *Clã:* ${clanEscolhido}\n🌿 *Raiz:* ${raiz} (${elementos})\n💪 *Corpo Divino:* ${corpoDivino || 'Nenhum'}\n❤️ *Órfão:* ${orfao ? 'Sim' : 'Não'}\n\nUse /perfil para ver detalhes. Boa sorte!`);
             }
         });
