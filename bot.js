@@ -2292,3 +2292,4 @@ async function processCommand(message) {
         await sendReply(message, 'Ocorreu um erro ao processar seu comando.');
     }
 }
+client.initialize();
