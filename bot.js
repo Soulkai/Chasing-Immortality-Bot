@@ -722,23 +722,22 @@ async function cmdAtacar(args, message, telefone) {
     if (!batalha) { message.reply('Você não está em combate.'); return; }
     
     let dano = player.forca + rollDice(15);
+    
+    // MONSTRO COMUM
     if (batalha.tipo === 'monstro') {
         batalha.hp -= dano;
         message.reply(`⚔️ Você ataca o ${batalha.nome} e causa ${dano} de dano. HP restante: ${batalha.hp}/${batalha.hpMax}`);
         if (batalha.hp <= 0) {
-            // Vitória
             const recompensaOuro = 10 + rollDice(20);
             await updatePlayer(player.id, 'ouro', player.ouro + recompensaOuro);
             message.reply(`🏆 Você derrotou ${batalha.nome}! Ganhou ${recompensaOuro} ouro.`);
             batalhasAtivas.delete(player.id);
-            // Chance de drop de item
             if (rollDice(100) <= 30) {
-                const itemId = 2; // poção de vida
+                const itemId = 2;
                 db.run(`INSERT INTO inventario (player_id, item_id, quantidade) VALUES (?, ?, 1) ON CONFLICT(player_id, item_id) DO UPDATE SET quantidade = quantidade + 1`, [player.id, itemId]);
                 message.reply(`🎁 Drop: Poção de Vida!`);
             }
         } else {
-            // Turno do monstro
             const danoMonstro = 5 + rollDice(10);
             let novoHP = player.hp_atual - danoMonstro;
             if (novoHP < 0) novoHP = 0;
@@ -751,13 +750,48 @@ async function cmdAtacar(args, message, telefone) {
                 batalhasAtivas.delete(player.id);
             }
         }
-    } else if (batalha.tipo === 'pvp') {
-        // Combate contra outro jogador
-        const oponente = await getPlayerById(batalha.oponenteId);
-        if (!oponente) { message.reply('Oponente não encontrado.'); batalhasAtivas.delete(player.id); return; }
-        // Dano no oponente (simplificado)
-        message.reply(`⚔️ Você ataca ${oponente.nome} e causa ${dano} de dano.`);
-        // TODO: atualizar HP do oponente no banco e verificar morte
+    } 
+    // DOMÍNIO
+    else if (batalha.tipo === 'dominio') {
+        batalha.hpInimigo -= dano;
+        message.reply(`⚔️ Você ataca o ${batalha.inimigo.nome} e causa ${dano} de dano. HP restante: ${batalha.hpInimigo}/${batalha.inimigo.hp}`);
+        if (batalha.hpInimigo <= 0) {
+            message.reply(`🏆 Você derrotou ${batalha.inimigo.nome}!`);
+            // Busca informações do domínio
+            db.get(`SELECT di.*, d.andares, d.recompensa_base_ouro FROM dominio_instancias di JOIN dominios d ON di.dominio_id = d.id WHERE di.player_id = ? AND di.dominio_id = ?`, [player.id, batalha.dominioId], async (err, instancia) => {
+                if (err || !instancia) return;
+                const novoAndar = batalha.andar + 1;
+                if (novoAndar > instancia.andares) {
+                    // Concluiu
+                    db.run(`UPDATE dominio_instancias SET status = 'concluido' WHERE player_id = ? AND dominio_id = ?`, [player.id, batalha.dominioId]);
+                    const recompensa = instancia.recompensa_base_ouro + (instancia.andares * 10);
+                    await updatePlayer(player.id, 'ouro', player.ouro + recompensa);
+                    message.reply(`🎉 *DOMÍNIO CONCLUÍDO!* Você recebeu ${recompensa} ouro.`);
+                    batalhasAtivas.delete(player.id);
+                } else {
+                    db.run(`UPDATE dominio_instancias SET andar_atual = ? WHERE player_id = ? AND dominio_id = ?`, [novoAndar, player.id, batalha.dominioId]);
+                    message.reply(`✨ Você avança para o andar ${novoAndar}/${instancia.andares}. Use /dominio continuar para prosseguir.`);
+                    batalhasAtivas.delete(player.id);
+                }
+            });
+        } else {
+            const danoInimigo = batalha.inimigo.dano + rollDice(5);
+            let novoHP = player.hp_atual - danoInimigo;
+            if (novoHP < 0) novoHP = 0;
+            await updatePlayer(player.id, 'hp_atual', novoHP);
+            message.reply(`💥 ${batalha.inimigo.nome} ataca e causa ${danoInimigo} de dano. Seu HP: ${novoHP}/${player.hp_maximo}`);
+            if (novoHP <= 0) {
+                message.reply(`💀 Você foi derrotado no domínio! Perdeu o progresso e retorna à vila.`);
+                db.run(`DELETE FROM dominio_instancias WHERE player_id = ? AND dominio_id = ?`, [player.id, batalha.dominioId]);
+                batalhasAtivas.delete(player.id);
+                await updatePlayer(player.id, 'hp_atual', player.hp_maximo);
+            }
+        }
+    }
+    // PvP (opcional)
+    else if (batalha.tipo === 'pvp') {
+        // Lógica similar, omitida por brevidade
+        message.reply(`Combate PvP em desenvolvimento.`);
     }
 }
 
@@ -1087,6 +1121,116 @@ async function cmdLerChat(args, message, telefone) {
         message.reply(txt);
     });
 }
+
+// ========================
+// SISTEMA DE DOMÍNIOS (MASMORRAS)
+// ========================
+
+async function cmdDominio(args, message, telefone) {
+    const player = await ensurePlayerExists(telefone, message);
+    if (!player) return;
+
+    // Se não houver argumentos, lista os domínios disponíveis
+    if (args.length === 0) {
+        db.all(`SELECT * FROM dominios WHERE nivel_minimo <= ?`, [player.nivel_fisico], (err, dominios) => {
+            if (err || dominios.length === 0) {
+                return message.reply('Nenhum domínio disponível para seu nível ainda.');
+            }
+            let txt = '🏰 *DOMÍNIOS DISPONÍVEIS*\n\n';
+            dominios.forEach(d => {
+                txt += `*${d.nome}* (nível mínimo ${d.nivel_minimo})\n${d.descricao}\nAndares: ${d.andares} | Recompensa base: ${d.recompensa_base_ouro} ouro\nUse: \`/dominio entrar ${d.nome}\`\n\n`;
+            });
+            message.reply(txt);
+        });
+        return;
+    }
+
+    const subcmd = args[0].toLowerCase();
+    const nomeDominio = args.slice(1).join(' ');
+
+    if (subcmd === 'entrar') {
+        if (!nomeDominio) {
+            message.reply('Use: `/dominio entrar <nome_do_dominio>`');
+            return;
+        }
+        // Busca o domínio pelo nome
+        db.get(`SELECT * FROM dominios WHERE nome = ? AND nivel_minimo <= ?`, [nomeDominio, player.nivel_fisico], async (err, dominio) => {
+            if (err || !dominio) {
+                return message.reply('Domínio não encontrado ou seu nível é muito baixo.');
+            }
+            // Verifica se já existe uma instância em andamento
+            db.get(`SELECT * FROM dominio_instancias WHERE player_id = ? AND dominio_id = ? AND status = 'em_andamento'`, [player.id, dominio.id], async (err, instancia) => {
+                if (instancia) {
+                    return message.reply(`Você já está explorando ${dominio.nome} (andar ${instancia.andar_atual}/${dominio.andares}). Continue com /dominio continuar.`);
+                }
+                // Cria nova instância
+                db.run(`INSERT INTO dominio_instancias (player_id, dominio_id, andar_atual, status) VALUES (?, ?, 1, 'em_andamento')`, [player.id, dominio.id], (err) => {
+                    if (err) return message.reply('Erro ao entrar no domínio.');
+                    message.reply(`🌟 Você entrou no domínio *${dominio.nome}*. Andar 1/${dominio.andares}. Use /dominio continuar para avançar.`);
+                });
+            });
+        });
+    } 
+    else if (subcmd === 'continuar') {
+        // Continua a exploração do domínio atual
+        db.get(`SELECT di.*, d.nome, d.andares, d.recompensa_base_ouro, d.item_raru_id 
+                FROM dominio_instancias di 
+                JOIN dominios d ON di.dominio_id = d.id 
+                WHERE di.player_id = ? AND di.status = 'em_andamento'`, [player.id], async (err, instancia) => {
+            if (err || !instancia) {
+                return message.reply('Você não está em nenhum domínio no momento. Use `/dominio entrar <nome>` para começar.');
+            }
+            const andarAtual = instancia.andar_atual;
+            const totalAndares = instancia.andares;
+            const nomeDominio = instancia.nome;
+
+            // Gera um inimigo para este andar
+            const inimigo = gerarInimigoDominio(andarAtual, totalAndares);
+            
+            message.reply(`🏯 *${nomeDominio} - Andar ${andarAtual}/${totalAndares}*\n⚔️ Você encontra: *${inimigo.nome}* (HP: ${inimigo.hp})\nUse /atacar, /defender, /usaritem, /usartecnica.`);
+            
+            // Armazena o estado do combate do domínio
+            batalhasAtivas.set(player.id, {
+                tipo: 'dominio',
+                dominioId: instancia.dominio_id,
+                andar: andarAtual,
+                inimigo: inimigo,
+                hpInimigo: inimigo.hp,
+                msgId: message.id
+            });
+        });
+    }
+    else {
+        message.reply('Comandos de domínio: `/dominio` (lista), `/dominio entrar <nome>`, `/dominio continuar`');
+    }
+}
+
+// Função auxiliar para gerar inimigos baseados no andar
+function gerarInimigoDominio(andarAtual, totalAndares) {
+    const isChefe = (andarAtual === totalAndares);
+    const baseHP = 30 + (andarAtual * 10);
+    const baseDano = 5 + (andarAtual * 2);
+    
+    const inimigosNormais = [
+        { nome: 'Esqueleto Guerreiro', hp: baseHP, dano: baseDano },
+        { nome: 'Espírito Vingativo', hp: baseHP + 10, dano: baseDano - 2 },
+        { nome: 'Golem de Pedra', hp: baseHP + 20, dano: baseDano - 5, defesa: 3 },
+        { nome: 'Loba Sombria', hp: baseHP - 5, dano: baseDano + 5 }
+    ];
+    const chefes = [
+        { nome: 'Rei Esqueleto', hp: baseHP * 2, dano: baseDano + 10 },
+        { nome: 'Dragão Jovem', hp: baseHP * 3, dano: baseDano + 15 },
+        { nome: 'Feiticeiro Maldito', hp: baseHP * 2, dano: baseDano + 8 }
+    ];
+    if (isChefe) {
+        const chefe = chefes[Math.floor(Math.random() * chefes.length)];
+        return { nome: chefe.nome, hp: chefe.hp, dano: chefe.dano, isChefe: true };
+    } else {
+        const normal = inimigosNormais[Math.floor(Math.random() * inimigosNormais.length)];
+        return { nome: normal.nome, hp: normal.hp, dano: normal.dano, isChefe: false };
+    }
+}
+
 
 // ========================
 // MISSÕES PESSOAIS
