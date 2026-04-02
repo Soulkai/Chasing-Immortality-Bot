@@ -221,6 +221,7 @@ async function cmdMudarAparencia(args, message, telefone) {
 }
 
 function cmdMenu(message) {
+    if (!message || !message.from) return;
     const agora = new Date();
     const dataStr = agora.toLocaleDateString('pt-BR');
     const horaStr = agora.toLocaleTimeString('pt-BR');
@@ -345,7 +346,16 @@ function cmdMenu(message) {
     menu += `▢\n`;
     menu += `╰━━─「🎮」─━━`;
     
-    client.sendMessage(message.from, menu).catch(err => log(`Erro ao enviar menu: ${err}`, 'ERRO'));
+    // Envia o menu em partes (WhatsApp limita a ~4096 caracteres, mas nosso menu é menor)
+    // O erro 'replace' pode ser devido a algum caractere não escapado. Vamos enviar como texto puro sem emojis complexos? Mas os emojis funcionam.
+    // Tentaremos enviar diretamente, mas se falhar, enviar em pedaços.
+    client.sendMessage(message.from, menu).catch(async (err) => {
+        log(`Erro ao enviar menu completo: ${err}. Tentando dividir...`, 'ERRO');
+        // Divide em partes de 2000 caracteres
+        for (let i = 0; i < menu.length; i += 2000) {
+            await client.sendMessage(message.from, menu.substring(i, i + 2000));
+        }
+    });
 }
 
 async function cmdGuia(args, message) {
