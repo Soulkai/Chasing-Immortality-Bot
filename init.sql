@@ -280,78 +280,137 @@ INSERT OR IGNORE INTO changelog (versao, data, texto) VALUES
 ('v1.0.0', date('now'), 'Lançamento oficial do Chasing Immortality. Sistemas: registro, cultivo, combate, seitas, mercado, NPCs, eventos.');
 
 
--- =====================================================
--- V2 GAMEPLAY - índices e tabelas extras
--- =====================================================
-CREATE UNIQUE INDEX IF NOT EXISTS idx_inventario_unique ON inventario(player_id, item_id);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_equipamentos_unique ON equipamentos(player_id, slot);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_profissoes_unique ON profissoes(player_id);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_tecnicas_unique ON tecnicas_aprendidas(player_id, tecnica_id);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_biblioteca_unique ON biblioteca_seita(seita_id, tecnica_id);
+-- ========================
+-- ETAPA 3 - MUNDO VIVO / IA OPCIONAL
+-- ========================
+CREATE UNIQUE INDEX IF NOT EXISTS idx_inventario_player_item_unique ON inventario(player_id, item_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_equipamentos_player_slot_unique ON equipamentos(player_id, slot);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_biblioteca_seita_unique ON biblioteca_seita(seita_id, tecnica_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_amigos_inimigos_unique ON amigos_inimigos(player_id, alvo_id, tipo);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_npcs_nome_local_unique ON npcs(nome, localizacao);
 
-CREATE TABLE IF NOT EXISTS receitas_craft (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    profissao TEXT NOT NULL,
-    nome TEXT NOT NULL,
-    resultado_item_id INTEGER NOT NULL,
-    resultado_quantidade INTEGER DEFAULT 1,
-    nivel_necessario INTEGER DEFAULT 1,
-    custo_ouro INTEGER DEFAULT 0,
-    chance_base INTEGER DEFAULT 80,
-    xp_ganho INTEGER DEFAULT 20,
-    descricao TEXT,
-    FOREIGN KEY(resultado_item_id) REFERENCES itens(id)
+CREATE TABLE IF NOT EXISTS npc_profiles (
+    npc_id INTEGER PRIMARY KEY,
+    titulo TEXT,
+    personalidade TEXT,
+    arquetipo TEXT,
+    estilo TEXT,
+    prompt_base TEXT,
+    FOREIGN KEY(npc_id) REFERENCES npcs(id)
 );
 
-CREATE TABLE IF NOT EXISTS receita_ingredientes (
-    receita_id INTEGER,
-    item_id INTEGER,
-    quantidade INTEGER DEFAULT 1,
-    FOREIGN KEY(receita_id) REFERENCES receitas_craft(id),
-    FOREIGN KEY(item_id) REFERENCES itens(id)
+CREATE TABLE IF NOT EXISTS npc_relacoes (
+    npc_id INTEGER,
+    player_id INTEGER,
+    afinidade INTEGER DEFAULT 0,
+    confianca INTEGER DEFAULT 0,
+    medo INTEGER DEFAULT 0,
+    favor INTEGER DEFAULT 0,
+    memoria_curta TEXT DEFAULT '',
+    ultima_interacao TEXT DEFAULT CURRENT_TIMESTAMP,
+    flags_json TEXT DEFAULT '{}',
+    PRIMARY KEY (npc_id, player_id)
 );
 
-CREATE TABLE IF NOT EXISTS bosses_regiao (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    nome TEXT,
-    localizacao TEXT,
-    descricao TEXT,
-    nivel INTEGER DEFAULT 1,
-    hp_base INTEGER DEFAULT 100,
-    ataque_base INTEGER DEFAULT 20,
-    defesa_base INTEGER DEFAULT 10,
-    recompensa_ouro INTEGER DEFAULT 50,
-    recompensa_merito INTEGER DEFAULT 1,
-    drop_item_id INTEGER,
-    drop_quantidade INTEGER DEFAULT 1,
-    FOREIGN KEY(drop_item_id) REFERENCES itens(id)
-);
-
-CREATE TABLE IF NOT EXISTS quests_npc (
+CREATE TABLE IF NOT EXISTS npc_quests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     npc_id INTEGER,
-    titulo TEXT,
+    nome TEXT,
     descricao TEXT,
     objetivo_tipo TEXT,
-    alvo_nome TEXT,
-    item_id INTEGER,
-    quantidade INTEGER DEFAULT 1,
+    objetivo_alvo TEXT,
+    objetivo_quantidade INTEGER DEFAULT 1,
     recompensa_ouro INTEGER DEFAULT 0,
     recompensa_item_id INTEGER,
     recompensa_merito INTEGER DEFAULT 0,
-    FOREIGN KEY(npc_id) REFERENCES npcs(id),
-    FOREIGN KEY(item_id) REFERENCES itens(id),
-    FOREIGN KEY(recompensa_item_id) REFERENCES itens(id)
+    branch_benevolente TEXT,
+    branch_pragmatica TEXT,
+    branch_cruel TEXT,
+    UNIQUE(npc_id, nome)
 );
 
-CREATE TABLE IF NOT EXISTS player_quests (
+CREATE TABLE IF NOT EXISTS npc_quest_progress (
     player_id INTEGER,
     quest_id INTEGER,
+    status TEXT DEFAULT 'oferecida',
     progresso INTEGER DEFAULT 0,
-    status TEXT DEFAULT 'em_andamento',
-    started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY(player_id) REFERENCES players(id),
-    FOREIGN KEY(quest_id) REFERENCES quests_npc(id)
+    branch_escolhida TEXT DEFAULT 'pragmatica',
+    data_inicio TEXT DEFAULT CURRENT_TIMESTAMP,
+    data_conclusao TEXT,
+    PRIMARY KEY (player_id, quest_id)
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_player_quests_unique ON player_quests(player_id, quest_id);
+CREATE TABLE IF NOT EXISTS entity_portraits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_type TEXT,
+    entity_key TEXT,
+    entity_name TEXT,
+    image_path TEXT,
+    remote_url TEXT,
+    public_url TEXT,
+    source_url TEXT,
+    prompt TEXT,
+    provider TEXT,
+    host_provider TEXT,
+    seed TEXT,
+    mime_type TEXT,
+    content_hash TEXT,
+    status TEXT DEFAULT 'cached',
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(entity_type, entity_key)
+);
+
+CREATE TABLE IF NOT EXISTS sect_relations (
+    fac_a TEXT,
+    fac_b TEXT,
+    relacao INTEGER DEFAULT 0,
+    descricao TEXT,
+    PRIMARY KEY (fac_a, fac_b)
+);
+
+CREATE TABLE IF NOT EXISTS player_bonds (
+    player_id INTEGER,
+    bond_type TEXT,
+    bond_key TEXT,
+    bond_name TEXT,
+    data_json TEXT DEFAULT '{}',
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (player_id, bond_type)
+);
+
+CREATE TABLE IF NOT EXISTS rumor_cache (
+    scope_key TEXT,
+    rumor_date TEXT,
+    rumors_json TEXT,
+    PRIMARY KEY (scope_key, rumor_date)
+);
+
+INSERT OR IGNORE INTO npcs (nome, localizacao, dialogo_inicial, opcoes, missao_id) VALUES
+('Velho Lin', 'Floresta Sombria', 'O velho apoia-se no cajado de bambu e observa sua respiração, como se lesse os meridianos da sua alma.', '[]', NULL),
+('Madame Xue', 'Vila Inicial', 'O perfume do incenso e do chá de ameixa envolve o pátio enquanto a mercadora sorri como quem esconde três segredos.', '[]', NULL),
+('Monge Shen', 'Templo Antigo', 'Cada pedra do templo parece ecoar sutras antigos quando o monge cruza as mãos diante do peito.', '[]', NULL),
+('Bai Qinghe', 'global', 'Um jovem de sobrancelhas afiadas fita você como se esta fosse apenas mais uma página da história que pretende dominar.', '[]', NULL);
+
+INSERT OR IGNORE INTO itens (nome, tipo, raridade, efeito, valor_venda, valor_compra, moeda_tipo) VALUES
+('Erva do Orvalho Noturno', 'material', 'Comum', 'Ingrediente espiritual', 8, 16, 'ouro'),
+('Fragmento de Osso Espiritual', 'material', 'Incomum', 'Ingrediente de bestas espirituais', 12, 25, 'ouro'),
+('Selo de Jade Partido', 'material', 'Raro', 'Vestígio de artefato antigo', 35, 70, 'ouro');
+
+INSERT OR IGNORE INTO sect_relations (fac_a, fac_b, relacao, descricao) VALUES
+('Wudang', 'Tang', -10, 'A tensão é fria, mas controlada.'),
+('Tang', 'Wudang', -10, 'A tensão é fria, mas controlada.'),
+('Wudang', 'Murong', 12, 'Uma aliança cautelosa mantém as estradas seguras.'),
+('Murong', 'Wudang', 12, 'Uma aliança cautelosa mantém as estradas seguras.'),
+('Shaolin', 'Emei', 18, 'As duas facções cooperam contra artes proibidas.'),
+('Emei', 'Shaolin', 18, 'As duas facções cooperam contra artes proibidas.'),
+('Namgung', 'Tang', -18, 'Velhas dívidas mancham as relações.'),
+('Tang', 'Namgung', -18, 'Velhas dívidas mancham as relações.'),
+('Pavilhão da Lua Sangrenta', 'Shaolin', -35, 'Sangue e sutras jamais concordaram.'),
+('Shaolin', 'Pavilhão da Lua Sangrenta', -35, 'Sangue e sutras jamais concordaram.'),
+('Senda Demoníaca do Norte', 'Wudang', -40, 'O conflito é quase inevitável.'),
+('Wudang', 'Senda Demoníaca do Norte', -40, 'O conflito é quase inevitável.');
+
+INSERT OR IGNORE INTO changelog (versao, data, texto) VALUES
+('v3.0.0', date('now'), 'Etapa 3: memória de NPC, rumores dinâmicos, eventos narrativos, mestres, rivais, política de seitas e retratos persistentes.');

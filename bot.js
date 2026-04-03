@@ -8,6 +8,8 @@ const sqlite3 = require('sqlite3').verbose();
 const qrcode = require('qrcode-terminal');
 const chalk = require('chalk');
 const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
 
 // ========== CONFIGURAÇÕES ==========
 const DONO_NUMERO = '120363425231463609'; // ⚠️ SUBSTITUA PELO ID/NÚMERO DO DONO
@@ -19,9 +21,51 @@ const MENU_SPLIT_SIZE = 2000;
 // ========== INICIALIZAÇÃO DO BANCO ==========
 const db = new sqlite3.Database(DB_PATH);
 const initSQL = fs.readFileSync('./init.sql', 'utf8');
-db.exec(initSQL, (err) => {
+
+function runExec(sql) {
+    return new Promise((resolve, reject) => {
+        db.exec(sql, (err) => {
+            if (err) reject(err);
+            else resolve();
+        });
+    });
+}
+
+async function applyMigrations() {
+    const migrations = [
+        `ALTER TABLE players ADD COLUMN banido INTEGER DEFAULT 0`,
+        `ALTER TABLE missoes_pessoais ADD COLUMN aceita_por INTEGER`,
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_inventario_player_item ON inventario(player_id, item_id)`,
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_tecnicas_player_tecnica ON tecnicas_aprendidas(player_id, tecnica_id)`,
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_profissoes_player ON profissoes(player_id)`,
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_seita_membros_unique ON seita_membros(seita_id, player_id)`,
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_biblioteca_seita_unique ON biblioteca_seita(seita_id, tecnica_id)`,
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_amigos_inimigos_unique ON amigos_inimigos(player_id, alvo_id, tipo)`,
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_loja_rpg_item_moeda_unique ON loja_rpg(item_id, moeda_tipo)`
+    ];
+
+    for (const sql of migrations) {
+        try {
+            await runExec(sql);
+        } catch (err) {
+            const msg = String(err?.message || err || '');
+            if (!msg.includes('duplicate column name')) {
+                log(`Migração ignorada com aviso: ${msg}`, 'INFO');
+            }
+        }
+    }
+}
+
+db.exec(initSQL, async (err) => {
     if (err) console.error(chalk.red('Erro ao criar tabelas:', err));
     else console.log(chalk.green('Banco de dados inicializado.'));
+
+    try {
+        await applyMigrations();
+        console.log(chalk.green('Migrações aplicadas/verificadas.'));
+    } catch (migrationErr) {
+        console.error(chalk.red('Erro ao aplicar migrações:', migrationErr));
+    }
 });
 
 // ========== FUNÇÕES DE LOG ==========
@@ -60,6 +104,15 @@ function weightedRandom(items, weights) {
         if (rand < accum) return items[i];
     }
     return items[0];
+}
+
+function normalizeKey(value) {
+    return String(value ?? '')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase()
+        .replace(/\s+/g, ' ')
+        .trim();
 }
 
 function normalizeWhatsAppId(value) {
@@ -131,6 +184,24 @@ function runQuery(sql, params = []) {
         db.run(sql, params, function onRun(err) {
             if (err) reject(err);
             else resolve(this);
+        });
+    });
+}
+
+function getQuery(sql, params = []) {
+    return new Promise((resolve, reject) => {
+        db.get(sql, params, (err, row) => {
+            if (err) reject(err);
+            else resolve(row || null);
+        });
+    });
+}
+
+function allQuery(sql, params = []) {
+    return new Promise((resolve, reject) => {
+        db.all(sql, params, (err, rows) => {
+            if (err) reject(err);
+            else resolve(rows || []);
         });
     });
 }
@@ -209,10 +280,46 @@ client.on('qr', (qr) => {
 
 client.on('ready', () => log('Bot conectado com sucesso!', 'SUCESSO'));
 
+async function handlePendingResponse(message) {
+    const telefone = getSenderId(message);
+    if (!telefone || !respostaPendente.has(telefone)) return false;
+
+    const pendente = respostaPendente.get(telefone);
+    if (!pendente || pendente.tipo !== 'registro') return false;
+
+    const rawBody = typeof message?.body === 'string' ? message.body.trim() : '';
+    const rawChoice = rawBody.startsWith(COMMAND_PREFIX)
+        ? rawBody.slice(COMMAND_PREFIX.length).trim()
+        : rawBody;
+
+    const escolha = parseInt(rawChoice, 10);
+    if (Number.isNaN(escolha) || escolha < 1 || escolha > 4) {
+        await sendReply(message, 'Resposta inválida. Digite apenas o número da opção (1 a 4).');
+        return true;
+    }
+
+    const perguntaIndex = pendente.dados.perguntaAtual;
+    const pergunta = pendente.perguntas[perguntaIndex];
+    if (!pergunta) {
+        respostaPendente.delete(telefone);
+        return true;
+    }
+
+    const opcao = pergunta.opcoes[escolha - 1];
+    pendente.dados.karmaTotal += opcao.karma;
+    pendente.dados.perguntaAtual++;
+    await pendente.enviarProxima(getChatId(message), pendente.dados);
+    return true;
+}
+
 client.on('message', async (message) => {
     try {
         const body = typeof message?.body === 'string' ? message.body.trim() : '';
-        if (!body || !body.startsWith(COMMAND_PREFIX)) return;
+        if (!body) return;
+
+        if (await handlePendingResponse(message)) return;
+
+        if (!body.startsWith(COMMAND_PREFIX)) return;
         log(`Comando de ${getSenderId(message) || message.from}: ${body}`, 'RECV');
         await processCommand(message);
     } catch (err) {
@@ -423,6 +530,123 @@ async function cmdPerfil(_args, message, telefone) {
     } else {
         await sendReply(message, texto);
     }
+}
+
+// ========================
+// COMANDOS DE VIAGEM
+// ========================
+async function cmdViajarCidade(args, message, telefone) {
+    const player = await ensurePlayerExists(telefone, message);
+    if (!player) return;
+    if (!args.length) {
+        db.all(`SELECT nome, nivel_minimo FROM locais_mae WHERE tipo = 'cidade' ORDER BY nivel_minimo`, (err, rows) => {
+            if (err || !rows.length) return sendReply(message, 'Nenhuma cidade disponível.');
+            let lista = '🏙️ *Cidades disponíveis:*\n';
+            rows.forEach(r => lista += `- ${r.nome} (mínimo nível ${r.nivel_minimo})\n`);
+            lista += '\nUse `/viajarcidade <nome>` para viajar.';
+            sendReply(message, lista);
+        });
+        return;
+    }
+    const nomeCidade = args.join(' ');
+    db.get(`SELECT * FROM locais_mae WHERE LOWER(nome) = LOWER(?) AND tipo = 'cidade'`, [nomeCidade], async (err, cidade) => {
+        if (err || !cidade) return sendReply(message, `Cidade "${nomeCidade}" não encontrada.`);
+        if (player.nivel_fisico < cidade.nivel_minimo) {
+            return sendReply(message, `Seu nível (${player.nivel_fisico}) é muito baixo para ${cidade.nome} (mínimo ${cidade.nivel_minimo}).`);
+        }
+        await updatePlayer(player.id, 'localizacao', cidade.nome);
+        sendReply(message, `✨ Você viajou para *${cidade.nome}*. ${cidade.descricao}\nUse /regioes para explorar as regiões próximas.`);
+    });
+}
+
+async function cmdViajarReino(args, message, telefone) {
+    const player = await ensurePlayerExists(telefone, message);
+    if (!player) return;
+    if (!args.length) {
+        db.all(`SELECT nome, nivel_minimo FROM locais_mae WHERE tipo = 'reino' ORDER BY nivel_minimo`, (err, rows) => {
+            if (err || !rows.length) return sendReply(message, 'Nenhum reino disponível.');
+            let lista = '🏰 *Reinos disponíveis:*\n';
+            rows.forEach(r => lista += `- ${r.nome} (mínimo nível ${r.nivel_minimo})\n`);
+            lista += '\nUse `/viajarreino <nome>` para viajar.';
+            sendReply(message, lista);
+        });
+        return;
+    }
+    const nomeReino = args.join(' ');
+    db.get(`SELECT * FROM locais_mae WHERE LOWER(nome) = LOWER(?) AND tipo = 'reino'`, [nomeReino], async (err, reino) => {
+        if (err || !reino) return sendReply(message, `Reino "${nomeReino}" não encontrado.`);
+        if (player.nivel_fisico < reino.nivel_minimo) {
+            return sendReply(message, `Seu nível (${player.nivel_fisico}) é muito baixo para ${reino.nome} (mínimo ${reino.nivel_minimo}).`);
+        }
+        await updatePlayer(player.id, 'localizacao', reino.nome);
+        sendReply(message, `✨ Você viajou para *${reino.nome}*. ${reino.descricao}\nUse /regioes para explorar.`);
+    });
+}
+
+async function cmdViajarImperio(args, message, telefone) {
+    const player = await ensurePlayerExists(telefone, message);
+    if (!player) return;
+    if (!args.length) {
+        db.all(`SELECT nome, nivel_minimo FROM locais_mae WHERE tipo = 'imperio' ORDER BY nivel_minimo`, (err, rows) => {
+            if (err || !rows.length) return sendReply(message, 'Nenhum império disponível.');
+            let lista = '🏛️ *Impérios disponíveis:*\n';
+            rows.forEach(r => lista += `- ${r.nome} (mínimo nível ${r.nivel_minimo})\n`);
+            lista += '\nUse `/viajarimperio <nome>` para viajar.';
+            sendReply(message, lista);
+        });
+        return;
+    }
+    const nomeImperio = args.join(' ');
+    db.get(`SELECT * FROM locais_mae WHERE LOWER(nome) = LOWER(?) AND tipo = 'imperio'`, [nomeImperio], async (err, imperio) => {
+        if (err || !imperio) return sendReply(message, `Império "${nomeImperio}" não encontrado.`);
+        if (player.nivel_fisico < imperio.nivel_minimo) {
+            return sendReply(message, `Seu nível (${player.nivel_fisico}) é muito baixo para ${imperio.nome} (mínimo ${imperio.nivel_minimo}).`);
+        }
+        await updatePlayer(player.id, 'localizacao', imperio.nome);
+        sendReply(message, `✨ Você viajou para *${imperio.nome}*. ${imperio.descricao}\nUse /regioes para explorar.`);
+    });
+}
+
+// Adicione esses comandos ao objeto 'commands' no processCommand:
+// viajarcidade: cmdViajarCidade,
+// viajarreino: cmdViajarReino,
+// viajarimperio: cmdViajarImperio,
+async function cmdRegioes(args, message, telefone) {
+    const player = await ensurePlayerExists(telefone, message);
+    if (!player) return;
+
+    // Se passou um nome de região como argumento, mostra detalhes
+    if (args.length > 0) {
+        const nomeRegiao = args.join(' ').toLowerCase();
+        db.get(`SELECT * FROM regioes WHERE LOWER(nome) = ?`, [nomeRegiao], (err, regiao) => {
+            if (err || !regiao) {
+                sendReply(message, `Região "${args.join(' ')}" não encontrada. Use /regioes para listar todas.`);
+                return;
+            }
+            let detalhes = `🏞️ *${regiao.nome}*\n`;
+            detalhes += `📖 ${regiao.descricao}\n`;
+            detalhes += `🎯 Nível recomendado: ${regiao.nivel_minimo} - ${regiao.nivel_maximo}\n`;
+            detalhes += `⚠️ Perigo: ${regiao.perigo.toUpperCase()}\n`;
+            detalhes += `💰 Recompensa base: ${regiao.recompensa_base} ouro\n`;
+            if (regiao.localizacao_pai) detalhes += `🗺️ Localização: ${regiao.localizacao_pai}\n`;
+            sendReply(message, detalhes);
+        });
+        return;
+    }
+
+    // Lista todas as regiões
+    db.all(`SELECT nome, nivel_minimo, nivel_maximo, perigo FROM regioes ORDER BY nivel_minimo ASC`, (err, rows) => {
+        if (err || !rows.length) {
+            sendReply(message, 'Nenhuma região cadastrada ainda.');
+            return;
+        }
+        let lista = `🗺️ *REGIÕES DISPONÍVEIS*\n\n`;
+        rows.forEach(r => {
+            lista += `📍 *${r.nome}* (nível ${r.nivel_minimo}-${r.nivel_maximo}) - Perigo: ${r.perigo}\n`;
+        });
+        lista += `\nUse /regioes <nome> para ver detalhes de uma região.`;
+        sendReply(message, lista);
+    });
 }
 
 async function cmdMudarAparencia(args, message, telefone) {
@@ -1489,7 +1713,7 @@ async function cmdCompletarMissao(args, message, telefone) {
         return;
     }
 
-    db.get(`SELECT * FROM missoes_pessoais WHERE id = ? AND status = 'em_andamento' AND criador_id != ?`, [missaoId, player.id], async (_err, missaoPessoal) => {
+    db.get(`SELECT * FROM missoes_pessoais WHERE id = ? AND status = 'em_andamento' AND criador_id != ? AND aceita_por = ?`, [missaoId, player.id, player.id], async (_err, missaoPessoal) => {
         if (missaoPessoal) {
             await updatePlayer(player.id, 'ouro', player.ouro + missaoPessoal.recompensa_moeda);
             db.run(`UPDATE missoes_pessoais SET status = 'concluida' WHERE id = ?`, [missaoId]);
@@ -1849,14 +2073,27 @@ async function cmdDominio(args, message, telefone) {
                 return;
             }
 
-            db.get(`SELECT * FROM dominio_instancias WHERE player_id = ? AND dominio_id = ? AND status = 'em_andamento'`, [player.id, dominio.id], (_err2, instancia) => {
-                if (instancia) {
+            db.get(`SELECT * FROM dominio_instancias WHERE player_id = ? AND dominio_id = ?`, [player.id, dominio.id], (_err2, instancia) => {
+                if (instancia && instancia.status === 'em_andamento') {
                     sendReply(message, `Você já está explorando ${dominio.nome} (andar ${instancia.andar_atual}/${dominio.andares}). Continue com /dominio continuar.`);
+                    return;
+                }
+
+                if (instancia) {
+                    db.run(`UPDATE dominio_instancias SET andar_atual = 1, status = 'em_andamento', data_inicio = CURRENT_TIMESTAMP WHERE player_id = ? AND dominio_id = ?`, [player.id, dominio.id], async (err3) => {
+                        if (err3) {
+                            log(`Erro ao reiniciar domínio ${dominio.nome}: ${err3?.message || err3}`, 'ERRO');
+                            await sendReply(message, 'Erro ao reiniciar o domínio.');
+                            return;
+                        }
+                        await sendReply(message, `🌟 Você entrou no domínio *${dominio.nome}*. Andar 1/${dominio.andares}. Use /dominio continuar para avançar.`);
+                    });
                     return;
                 }
 
                 db.run(`INSERT INTO dominio_instancias (player_id, dominio_id, andar_atual, status) VALUES (?, ?, 1, 'em_andamento')`, [player.id, dominio.id], async (err3) => {
                     if (err3) {
+                        log(`Erro ao criar instância de domínio ${dominio.nome}: ${err3?.message || err3}`, 'ERRO');
                         await sendReply(message, 'Erro ao entrar no domínio.');
                         return;
                     }
@@ -1868,14 +2105,26 @@ async function cmdDominio(args, message, telefone) {
     }
 
     if (subcmd === 'continuar') {
+        const batalhaAtual = batalhasAtivas.get(player.id);
+        if (batalhaAtual && batalhaAtual.tipo === 'dominio') {
+            await sendReply(message, 'Você já está em combate dentro do domínio. Use /atacar, /defender, /usaritem, /usartecnica ou /fugir.');
+            return;
+        }
+
         db.get(
-            `SELECT di.*, d.nome, d.andares, d.recompensa_base_ouro, d.item_raru_id 
+            `SELECT di.*, d.nome, d.andares, d.recompensa_base_ouro, d.item_raro_id 
              FROM dominio_instancias di 
              JOIN dominios d ON di.dominio_id = d.id 
              WHERE di.player_id = ? AND di.status = 'em_andamento'`,
             [player.id],
             async (err, instancia) => {
-                if (err || !instancia) {
+                if (err) {
+                    log(`Erro ao continuar domínio: ${err?.message || err}`, 'ERRO');
+                    await sendReply(message, 'Erro ao carregar o domínio atual.');
+                    return;
+                }
+
+                if (!instancia) {
                     await sendReply(message, 'Você não está em nenhum domínio no momento. Use `/dominio entrar <nome>` para começar.');
                     return;
                 }
@@ -1885,7 +2134,9 @@ async function cmdDominio(args, message, telefone) {
                 const nome = instancia.nome;
                 const inimigo = gerarInimigoDominio(andarAtual, totalAndares);
 
-                await sendReply(message, `🏯 *${nome} - Andar ${andarAtual}/${totalAndares}*\n⚔️ Você encontra: *${inimigo.nome}* (HP: ${inimigo.hp})\nUse /atacar, /defender, /usaritem, /usartecnica.`);
+                await sendReply(message, `🏯 *${nome} - Andar ${andarAtual}/${totalAndares}*
+⚔️ Você encontra: *${inimigo.nome}* (HP: ${inimigo.hp})
+Use /atacar, /defender, /usaritem, /usartecnica.`);
 
                 batalhasAtivas.set(player.id, {
                     tipo: 'dominio',
@@ -1994,7 +2245,7 @@ async function cmdAceitarMissaoPessoal(args, message, telefone) {
         return;
     }
 
-    db.run(`UPDATE missoes_pessoais SET status = 'em_andamento' WHERE id = ? AND status = 'aberta'`, [missaoId], async function onUpdate(err) {
+    db.run(`UPDATE missoes_pessoais SET status = 'em_andamento', aceita_por = ? WHERE id = ? AND status = 'aberta'`, [player.id, missaoId], async function onUpdate(err) {
         if (err || this.changes === 0) await sendReply(message, 'Missão não disponível.');
         else await sendReply(message, 'Missão aceita! Complete o objetivo e use `/completarmissao <id>` quando terminar.');
     });
@@ -2197,25 +2448,12 @@ async function processCommand(message) {
             return;
         }
 
-        // ========== VERIFICAÇÃO DE RESPOSTA PENDENTE (ex: perguntas do registro) ==========
-        if (respostaPendente && respostaPendente.has(telefone)) {
-            const pendente = respostaPendente.get(telefone);
-            if (pendente.tipo === 'registro') {
-                const escolha = parseInt(cmd); // O usuário responde apenas com o número, sem "/"
-                if (isNaN(escolha) || escolha < 1 || escolha > 4) {
-                    await sendReply(message, 'Resposta inválida. Digite o número da opção (1 a 4).');
-                    return;
-                }
-                const perguntaIndex = pendente.dados.perguntaAtual;
-                const pergunta = pendente.perguntas[perguntaIndex];
-                const opcao = pergunta.opcoes[escolha - 1];
-                pendente.dados.karmaTotal += opcao.karma;
-                pendente.dados.perguntaAtual++;
-                await pendente.enviarProxima(message.from, pendente.dados);
-                return;
-            }
+        const existingPlayer = await getPlayer(telefone);
+        if (existingPlayer?.banido && !isOwner(message, telefone)) {
+            await sendReply(message, '🚫 Seu acesso ao jogo está bloqueado.');
+            return;
         }
-        // ========== FIM DA VERIFICAÇÃO ==========
+
 
         const commands = {
             registrar: cmdRegistrar,
@@ -2270,6 +2508,9 @@ async function processCommand(message) {
             status: cmdPerfil,
             atributos: cmdPerfil,
             romper: cmdRomper,
+            regioes: cmdRegioes,
+            viajarcidade: cmdViajarCidade,
+            viajarregiao: cmdViajarRegiao,
             jogadores: cmdJogadores,
             encontrar: cmdEncontrar,
             trocar: cmdTrocar,
@@ -2294,2085 +2535,1353 @@ async function processCommand(message) {
 }
 
 
-// =====================================================
-// V2 GAMEPLAY PATCH - tribulação, equipamentos, craft,
-// bosses, quests NPC e perfil renovado.
-// =====================================================
-
-function getQuery(sql, params = []) {
-    return new Promise((resolve, reject) => {
-        db.get(sql, params, (err, row) => {
-            if (err) reject(err);
-            else resolve(row || null);
-        });
-    });
+async function shutdown(signal) {
+    try {
+        log(`Encerrando bot (${signal})...`, 'INFO');
+        await client.destroy().catch(() => {});
+        db.close();
+    } finally {
+        process.exit(0);
+    }
 }
 
-function allQuery(sql, params = []) {
-    return new Promise((resolve, reject) => {
-        db.all(sql, params, (err, rows) => {
-            if (err) reject(err);
-            else resolve(rows || []);
-        });
-    });
-}
+process.on('SIGINT', () => {
+    shutdown('SIGINT');
+});
 
-function normalizeKey(value) {
-    return String(value || '')
-        .normalize('NFD')
-        .replace(/[\u0300-\u036f]/g, '')
-        .trim()
-        .toLowerCase();
-}
+process.on('SIGTERM', () => {
+    shutdown('SIGTERM');
+});
 
+client.initialize();
+
+
+
+// ========================
+// ETAPA 3 - MUNDO VIVO, IA OPCIONAL E RETRATOS PERSISTENTES
+// ========================
+const GENERATED_DIR = path.join(__dirname, 'generated_assets');
+const GENERATED_IMAGES_DIR = path.join(GENERATED_DIR, 'images');
+const AI_PROVIDER = normalizeKey(process.env.AI_PROVIDER || 'fallback');
+const OLLAMA_URL = process.env.OLLAMA_URL || 'http://127.0.0.1:11434/api/generate';
+const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'gemma3:4b';
+const IMAGE_PROVIDER = normalizeKey(process.env.IMAGE_PROVIDER || 'disabled');
+const IMAGE_API_URL = process.env.IMAGE_API_URL || '';
+const IMAGE_TIMEOUT_MS = Number(process.env.IMAGE_TIMEOUT_MS || 45000);
+const IMAGE_HOST_PROVIDER = normalizeKey(process.env.IMAGE_HOST_PROVIDER || process.env.IMAGE_UPLOAD_PROVIDER || 'disabled');
+const IMGBB_API_KEY = process.env.IMGBB_API_KEY || '';
+const IMAGEKIT_PUBLIC_KEY = process.env.IMAGEKIT_PUBLIC_KEY || '';
+const IMAGEKIT_PRIVATE_KEY = process.env.IMAGEKIT_PRIVATE_KEY || '';
+const IMAGEKIT_URL_ENDPOINT = process.env.IMAGEKIT_URL_ENDPOINT || '';
+const IMAGEKIT_FOLDER = process.env.IMAGEKIT_FOLDER || '/chasing-immortality';
+const IMAGE_PUBLIC_BASE_URL = process.env.IMAGE_PUBLIC_BASE_URL || '';
+const npcDialogueSessions = new Map();
+globalThis.__npcDialogueSessions = npcDialogueSessions;
+
+function ensureDirSync(dir) {
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+}
+ensureDirSync(GENERATED_DIR);
+ensureDirSync(GENERATED_IMAGES_DIR);
+
+function capFirst(value) {
+    const s = String(value || '').trim();
+    return s ? s.charAt(0).toUpperCase() + s.slice(1) : '';
+}
 function clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
 }
-
-function randomBetween(min, max) {
-    return min + Math.floor(Math.random() * (max - min + 1));
+function formatBar(value, max, size = 10) {
+    const safeMax = Math.max(1, Number(max || 1));
+    const safeVal = clamp(Number(value || 0), 0, safeMax);
+    const filled = Math.round((safeVal / safeMax) * size);
+    return `${'█'.repeat(filled)}${'░'.repeat(size - filled)}`;
+}
+function signedNumber(value) {
+    const num = Number(value || 0);
+    return num > 0 ? `+${num}` : String(num);
+}
+function safeJsonParse(value, fallback = {}) {
+    try { return value ? JSON.parse(value) : fallback; } catch (_err) { return fallback; }
+}
+function todayKey() { return new Date().toISOString().slice(0, 10); }
+function nowIso() { return new Date().toISOString(); }
+function normalizeEntityKey(entityType, entityKey) {
+    return `${normalizeKey(entityType)}:${normalizeKey(entityKey)}`;
 }
 
-function buildBar(current, max, size = 10) {
-    const safeMax = Math.max(1, Number(max || 0));
-    const safeCurrent = clamp(Number(current || 0), 0, safeMax);
-    const filled = Math.round((safeCurrent / safeMax) * size);
-    return `${'█'.repeat(filled)}${'░'.repeat(Math.max(0, size - filled))}`;
-}
-
-function displayProfessionName(key) {
-    const names = {
-        alquimista: 'Alquimista',
-        forjador: 'Forjador',
-        medico: 'Médico',
-        mestre_talisma: 'Mestre de Talismã',
-        mestre_formacoes: 'Mestre de Formações'
-    };
-    return names[key] || key || 'Sem profissão';
-}
-
-function normalizeProfessionName(input) {
-    const key = normalizeKey(input);
-    const aliases = {
-        alquimista: 'alquimista',
-        forjador: 'forjador',
-        medico: 'medico',
-        medicoo: 'medico',
-        'mestre de talisma': 'mestre_talisma',
-        'mestre de talismã': 'mestre_talisma',
-        talisma: 'mestre_talisma',
-        talisman: 'mestre_talisma',
-        'mestre de formacoes': 'mestre_formacoes',
-        'mestre de formações': 'mestre_formacoes',
-        formacoes: 'mestre_formacoes',
-        formacao: 'mestre_formacoes'
-    };
-    return aliases[key] || null;
-}
-
-function inferSlotFromItem(row) {
-    const explicit = String(row?.slot || '').trim();
-    if (explicit) return explicit;
-    const tipo = normalizeKey(row?.tipo);
-    if (tipo.includes('arma')) return 'arma';
-    if (tipo.includes('armadura')) return 'armadura';
-    if (tipo.includes('bota')) return 'botas';
-    if (tipo.includes('amuleto')) return 'amuleto';
-    if (tipo.includes('talisma')) return 'talisma';
-    if (tipo.includes('artefato')) return 'artefato';
-    return '';
-}
-
-async function safeRun(sql, params = []) {
-    try {
-        await runQuery(sql, params);
-    } catch (_err) {
-        return null;
-    }
-    return true;
-}
-
-async function addItemToInventory(playerId, itemId, quantidade = 1) {
-    const qty = Math.max(1, parseInt(quantidade, 10) || 1);
-    await runQuery(
-        `INSERT INTO inventario (player_id, item_id, quantidade)
-         VALUES (?, ?, ?)
-         ON CONFLICT(player_id, item_id) DO UPDATE SET quantidade = quantidade + excluded.quantidade`,
-        [playerId, itemId, qty]
-    );
-}
-
-async function removeItemFromInventory(playerId, itemId, quantidade = 1) {
-    const qty = Math.max(1, parseInt(quantidade, 10) || 1);
-    const row = await getQuery(`SELECT quantidade FROM inventario WHERE player_id = ? AND item_id = ?`, [playerId, itemId]);
-    if (!row || row.quantidade < qty) return false;
-    if (row.quantidade === qty) {
-        await runQuery(`DELETE FROM inventario WHERE player_id = ? AND item_id = ?`, [playerId, itemId]);
-    } else {
-        await runQuery(`UPDATE inventario SET quantidade = quantidade - ? WHERE player_id = ? AND item_id = ?`, [qty, playerId, itemId]);
-    }
-    return true;
-}
-
-async function getOrCreateItemByName(nome, defaults = {}) {
-    let item = await getQuery(`SELECT * FROM itens WHERE nome = ?`, [nome]);
-    if (item) {
-        const updates = {
-            tipo: defaults.tipo ?? item.tipo ?? 'material',
-            raridade: defaults.raridade ?? item.raridade ?? 'Comum',
-            efeito: defaults.efeito ?? item.efeito ?? '',
-            valor_venda: defaults.valor_venda ?? item.valor_venda ?? 0,
-            valor_compra: defaults.valor_compra ?? item.valor_compra ?? 0,
-            moeda_tipo: defaults.moeda_tipo ?? item.moeda_tipo ?? 'ouro',
-            slot: defaults.slot ?? item.slot ?? null,
-            equipavel: defaults.equipavel ?? item.equipavel ?? 0,
-            bonus_forca: defaults.bonus_forca ?? item.bonus_forca ?? 0,
-            bonus_vigor: defaults.bonus_vigor ?? item.bonus_vigor ?? 0,
-            bonus_defesa: defaults.bonus_defesa ?? item.bonus_defesa ?? 0,
-            bonus_inteligencia: defaults.bonus_inteligencia ?? item.bonus_inteligencia ?? 0,
-            bonus_espirito: defaults.bonus_espirito ?? item.bonus_espirito ?? 0,
-            bonus_agilidade: defaults.bonus_agilidade ?? item.bonus_agilidade ?? 0,
-            bonus_hp: defaults.bonus_hp ?? item.bonus_hp ?? 0,
-            bonus_qi: defaults.bonus_qi ?? item.bonus_qi ?? 0,
-            bonus_alma: defaults.bonus_alma ?? item.bonus_alma ?? 0,
-            stackavel: defaults.stackavel ?? item.stackavel ?? 1
-        };
-        await safeRun(
-            `UPDATE itens SET tipo = ?, raridade = ?, efeito = ?, valor_venda = ?, valor_compra = ?, moeda_tipo = ?, slot = ?, equipavel = ?,
-             bonus_forca = ?, bonus_vigor = ?, bonus_defesa = ?, bonus_inteligencia = ?, bonus_espirito = ?, bonus_agilidade = ?, bonus_hp = ?, bonus_qi = ?, bonus_alma = ?, stackavel = ?
-             WHERE id = ?`,
-            [
-                updates.tipo, updates.raridade, updates.efeito, updates.valor_venda, updates.valor_compra, updates.moeda_tipo,
-                updates.slot, updates.equipavel, updates.bonus_forca, updates.bonus_vigor, updates.bonus_defesa, updates.bonus_inteligencia,
-                updates.bonus_espirito, updates.bonus_agilidade, updates.bonus_hp, updates.bonus_qi, updates.bonus_alma, updates.stackavel, item.id
-            ]
-        );
-        return await getQuery(`SELECT * FROM itens WHERE id = ?`, [item.id]);
-    }
-
-    const payload = {
-        tipo: defaults.tipo || 'material',
-        raridade: defaults.raridade || 'Comum',
-        efeito: defaults.efeito || '',
-        valor_venda: defaults.valor_venda ?? 0,
-        valor_compra: defaults.valor_compra ?? 0,
-        moeda_tipo: defaults.moeda_tipo || 'ouro',
-        slot: defaults.slot || null,
-        equipavel: defaults.equipavel ?? 0,
-        bonus_forca: defaults.bonus_forca ?? 0,
-        bonus_vigor: defaults.bonus_vigor ?? 0,
-        bonus_defesa: defaults.bonus_defesa ?? 0,
-        bonus_inteligencia: defaults.bonus_inteligencia ?? 0,
-        bonus_espirito: defaults.bonus_espirito ?? 0,
-        bonus_agilidade: defaults.bonus_agilidade ?? 0,
-        bonus_hp: defaults.bonus_hp ?? 0,
-        bonus_qi: defaults.bonus_qi ?? 0,
-        bonus_alma: defaults.bonus_alma ?? 0,
-        stackavel: defaults.stackavel ?? 1
-    };
-
-    const result = await runQuery(
-        `INSERT INTO itens (nome, tipo, raridade, efeito, valor_venda, valor_compra, moeda_tipo, slot, equipavel,
-         bonus_forca, bonus_vigor, bonus_defesa, bonus_inteligencia, bonus_espirito, bonus_agilidade, bonus_hp, bonus_qi, bonus_alma, stackavel)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-            nome, payload.tipo, payload.raridade, payload.efeito, payload.valor_venda, payload.valor_compra, payload.moeda_tipo, payload.slot,
-            payload.equipavel, payload.bonus_forca, payload.bonus_vigor, payload.bonus_defesa, payload.bonus_inteligencia, payload.bonus_espirito,
-            payload.bonus_agilidade, payload.bonus_hp, payload.bonus_qi, payload.bonus_alma, payload.stackavel
-        ]
-    );
-    return await getQuery(`SELECT * FROM itens WHERE id = ?`, [result.lastID]);
-}
-
-async function getEquipmentRows(playerId) {
-    return await allQuery(
-        `SELECT e.slot, i.*
-         FROM equipamentos e
-         JOIN itens i ON i.id = e.item_id
-         WHERE e.player_id = ?
-         ORDER BY e.slot ASC`,
-        [playerId]
-    );
-}
-
-async function getPlayerSheet(playerInput) {
-    const player = playerInput?.id ? playerInput : await getPlayerById(playerInput);
-    if (!player) return null;
-
-    const equipment = await getEquipmentRows(player.id);
-    const bonus = {
-        forca: 0, vigor: 0, defesa: 0, inteligencia: 0, espirito: 0, agilidade: 0, hp: 0, qi: 0, alma: 0
-    };
-    for (const row of equipment) {
-        bonus.forca += Number(row.bonus_forca || 0);
-        bonus.vigor += Number(row.bonus_vigor || 0);
-        bonus.defesa += Number(row.bonus_defesa || 0);
-        bonus.inteligencia += Number(row.bonus_inteligencia || 0);
-        bonus.espirito += Number(row.bonus_espirito || 0);
-        bonus.agilidade += Number(row.bonus_agilidade || 0);
-        bonus.hp += Number(row.bonus_hp || 0);
-        bonus.qi += Number(row.bonus_qi || 0);
-        bonus.alma += Number(row.bonus_alma || 0);
-    }
-
-    const totals = {
-        forca: Number(player.forca || 0) + bonus.forca,
-        vigor: Number(player.vigor || 0) + bonus.vigor,
-        defesa: Number(player.defesa || 0) + bonus.defesa,
-        inteligencia: Number(player.inteligencia || 0) + bonus.inteligencia,
-        espirito: Number(player.espirito || 0) + bonus.espirito,
-        agilidade: Number(player.agilidade || 0) + bonus.agilidade,
-        hpMax: Math.max(1, Number(player.hp_maximo || 0) + bonus.hp),
-        qiMax: Math.max(1, Number(player.qi_maximo || 0) + bonus.qi),
-        almaMax: Math.max(1, Number(player.alma_maxima || 0) + bonus.alma),
-    };
-
-    return {
-        player,
-        equipment,
-        bonus,
-        totals,
-        hpAtual: clamp(Number(player.hp_atual || 0), 0, totals.hpMax),
-        qiAtual: clamp(Number(player.qi_atual || 0), 0, totals.qiMax),
-        almaAtual: clamp(Number(player.alma_atual || 0), 0, totals.almaMax),
-        fadigaAtual: clamp(Number(player.fadiga || 0), 0, 100)
-    };
-}
-
-async function getProfessionRow(playerId) {
-    return await getQuery(`SELECT * FROM profissoes WHERE player_id = ?`, [playerId]);
-}
-
-async function getCraftRecipeByIdOrName(profissao, query) {
-    const maybeId = parseInt(query, 10);
-    if (!Number.isNaN(maybeId)) {
-        return await getQuery(`SELECT * FROM receitas_craft WHERE profissao = ? AND id = ?`, [profissao, maybeId]);
-    }
-    return await getQuery(`SELECT * FROM receitas_craft WHERE profissao = ? AND LOWER(nome) = LOWER(?)`, [profissao, query]);
-}
-
-async function listCraftRecipesForProfession(profissao) {
-    return await allQuery(`SELECT * FROM receitas_craft WHERE profissao = ? ORDER BY nivel_necessario ASC, id ASC`, [profissao]);
-}
-
-async function getRecipeIngredients(receitaId) {
-    return await allQuery(
-        `SELECT ri.item_id, ri.quantidade, i.nome
-         FROM receita_ingredientes ri
-         JOIN itens i ON i.id = ri.item_id
-         WHERE ri.receita_id = ?
-         ORDER BY i.nome ASC`,
-        [receitaId]
-    );
-}
-
-async function updateQuestProgressOnKill(playerId, targetName, tipo) {
-    const rows = await allQuery(
-        `SELECT pq.player_id, pq.quest_id, pq.progresso, q.quantidade
-         FROM player_quests pq
-         JOIN quests_npc q ON q.id = pq.quest_id
-         WHERE pq.player_id = ? AND pq.status = 'em_andamento' AND q.objetivo_tipo = ? AND LOWER(q.alvo_nome) = LOWER(?)`,
-        [playerId, tipo, targetName]
-    );
-
-    for (const row of rows) {
-        const novo = Math.min(Number(row.quantidade || 1), Number(row.progresso || 0) + 1);
-        const status = novo >= Number(row.quantidade || 1) ? 'pronta_entrega' : 'em_andamento';
-        await runQuery(`UPDATE player_quests SET progresso = ?, status = ? WHERE player_id = ? AND quest_id = ?`, [novo, status, playerId, row.quest_id]);
+async function ensureColumn(tableName, columnName, definition) {
+    const cols = await allQuery(`PRAGMA table_info(${tableName})`);
+    if (!cols.some((col) => col.name === columnName)) {
+        await runQuery(`ALTER TABLE ${tableName} ADD COLUMN ${definition}`);
     }
 }
 
-async function ensureStarterSetup(player) {
-    await safeRun(`UPDATE players SET banido = COALESCE(banido, 0), merito = COALESCE(merito, 0) WHERE id = ?`, [player.id]);
+async function ensureStage3Schema() {
+    await ensureColumn('players', 'alma_atual', 'alma_atual INTEGER DEFAULT 50');
+    await ensureColumn('players', 'alma_maxima', 'alma_maxima INTEGER DEFAULT 50');
+    await ensureColumn('players', 'merito', 'merito INTEGER DEFAULT 0');
+    await ensureColumn('players', 'banido', 'banido INTEGER DEFAULT 0');
+    await ensureColumn('entity_portraits', 'entity_name', 'entity_name TEXT');
+    await ensureColumn('entity_portraits', 'public_url', 'public_url TEXT');
+    await ensureColumn('entity_portraits', 'host_provider', 'host_provider TEXT');
+    await ensureColumn('entity_portraits', 'source_url', 'source_url TEXT');
+    await ensureColumn('entity_portraits', 'mime_type', 'mime_type TEXT');
+    await ensureColumn('entity_portraits', 'content_hash', 'content_hash TEXT');
+    await ensureColumn('entity_portraits', 'updated_at', 'updated_at TEXT DEFAULT CURRENT_TIMESTAMP');
 
-    const almaBase = Math.max(50, (Number(player.espirito || 0) + Number(player.inteligencia || 0)) * 2);
-    if (player.alma_maxima == null || player.alma_maxima <= 0) {
-        await safeRun(`UPDATE players SET alma_maxima = ?, alma_atual = COALESCE(alma_atual, ?) WHERE id = ?`, [almaBase, almaBase, player.id]);
-    } else if (player.alma_atual == null) {
-        await safeRun(`UPDATE players SET alma_atual = alma_maxima WHERE id = ?`, [player.id]);
-    }
+    const statements = [
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_inventario_player_item_unique ON inventario(player_id, item_id)`,
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_equipamentos_player_slot_unique ON equipamentos(player_id, slot)`,
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_biblioteca_seita_unique ON biblioteca_seita(seita_id, tecnica_id)`,
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_amigos_inimigos_unique ON amigos_inimigos(player_id, alvo_id, tipo)`,
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_npcs_nome_local_unique ON npcs(nome, localizacao)`,
+        `CREATE TABLE IF NOT EXISTS npc_profiles (
+            npc_id INTEGER PRIMARY KEY,
+            titulo TEXT,
+            personalidade TEXT,
+            arquetipo TEXT,
+            estilo TEXT,
+            prompt_base TEXT,
+            FOREIGN KEY(npc_id) REFERENCES npcs(id)
+        )`,
+        `CREATE TABLE IF NOT EXISTS npc_relacoes (
+            npc_id INTEGER,
+            player_id INTEGER,
+            afinidade INTEGER DEFAULT 0,
+            confianca INTEGER DEFAULT 0,
+            medo INTEGER DEFAULT 0,
+            favor INTEGER DEFAULT 0,
+            memoria_curta TEXT DEFAULT '',
+            ultima_interacao TEXT DEFAULT CURRENT_TIMESTAMP,
+            flags_json TEXT DEFAULT '{}',
+            PRIMARY KEY (npc_id, player_id)
+        )`,
+        `CREATE TABLE IF NOT EXISTS npc_quests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            npc_id INTEGER,
+            nome TEXT,
+            descricao TEXT,
+            objetivo_tipo TEXT,
+            objetivo_alvo TEXT,
+            objetivo_quantidade INTEGER DEFAULT 1,
+            recompensa_ouro INTEGER DEFAULT 0,
+            recompensa_item_id INTEGER,
+            recompensa_merito INTEGER DEFAULT 0,
+            branch_benevolente TEXT,
+            branch_pragmatica TEXT,
+            branch_cruel TEXT,
+            UNIQUE(npc_id, nome)
+        )`,
+        `CREATE TABLE IF NOT EXISTS npc_quest_progress (
+            player_id INTEGER,
+            quest_id INTEGER,
+            status TEXT DEFAULT 'oferecida',
+            progresso INTEGER DEFAULT 0,
+            branch_escolhida TEXT DEFAULT 'pragmatica',
+            data_inicio TEXT DEFAULT CURRENT_TIMESTAMP,
+            data_conclusao TEXT,
+            PRIMARY KEY (player_id, quest_id)
+        )`,
+        `CREATE TABLE IF NOT EXISTS entity_portraits (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_type TEXT,
+            entity_key TEXT,
+            entity_name TEXT,
+            image_path TEXT,
+            remote_url TEXT,
+            public_url TEXT,
+            source_url TEXT,
+            prompt TEXT,
+            provider TEXT,
+            host_provider TEXT,
+            seed TEXT,
+            mime_type TEXT,
+            content_hash TEXT,
+            status TEXT DEFAULT 'cached',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(entity_type, entity_key)
+        )`,
+        `CREATE TABLE IF NOT EXISTS sect_relations (
+            fac_a TEXT,
+            fac_b TEXT,
+            relacao INTEGER DEFAULT 0,
+            descricao TEXT,
+            PRIMARY KEY (fac_a, fac_b)
+        )`,
+        `CREATE TABLE IF NOT EXISTS player_bonds (
+            player_id INTEGER,
+            bond_type TEXT,
+            bond_key TEXT,
+            bond_name TEXT,
+            data_json TEXT DEFAULT '{}',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (player_id, bond_type)
+        )`,
+        `CREATE TABLE IF NOT EXISTS rumor_cache (
+            scope_key TEXT,
+            rumor_date TEXT,
+            rumors_json TEXT,
+            PRIMARY KEY (scope_key, rumor_date)
+        )`
+    ];
+    for (const statement of statements) await runQuery(statement);
+    await seedStage3Data();
+}
 
-    const starter = await getQuery(`SELECT id FROM tecnicas WHERE nome = 'Meditação da Respiração Primordial'`);
-    if (starter) {
-        const learned = await getQuery(`SELECT 1 FROM tecnicas_aprendidas WHERE player_id = ? AND tecnica_id = ?`, [player.id, starter.id]);
-        if (!learned) {
-            await runQuery(`INSERT INTO tecnicas_aprendidas (player_id, tecnica_id, compreensao, aprendida) VALUES (?, ?, 100, 1)`, [player.id, starter.id]);
+async function seedStage3Data() {
+    const npcSeeds = [
+        ['Velho Lin','Floresta Sombria','O velho apoia-se no cajado de bambu e observa sua respiração, como se lesse os meridianos da sua alma.','Mestre Errante da Névoa','solene, perspicaz, paciente, testa o coração antes da lâmina','mestre','wuxia/xianxia, montanhas, névoa, vestes simples, presença serena','ancião cultivador wuxia, mestre errante, barba longa, cajado de bambu, névoa de floresta, arte xianxia detalhada'],
+        ['Madame Xue','Vila Inicial','O perfume do incenso e do chá de ameixa envolve o pátio enquanto a mercadora sorri como quem esconde três segredos.','Mercadora das Mil Histórias','astuta, cordial, mercantil, observa o valor das pessoas','mercadora','mercado oriental, seda, lanternas, luxo contido','mercadora wuxia elegante, roupas de seda vermelha, mercado oriental, lanternas douradas, arte xianxia refinada'],
+        ['Monge Shen','Templo Antigo','Cada pedra do templo parece ecoar sutras antigos quando o monge cruza as mãos diante do peito.','Guardião do Sino Vazio','disciplinado, austero, compassivo, inimigo do caos','guardiao','templo antigo, pedras, sinos, iluminação dourada','monge guerreiro wuxia, templo antigo, contas de oração, luz dourada, arte xianxia detalhada'],
+        ['Bai Qinghe','global','Um jovem de sobrancelhas afiadas fita você como se esta fosse apenas mais uma página da história que pretende dominar.','Lâmina Rival do Rio Branco','orgulhoso, competitivo, ambicioso, não esquece humilhações','rival','espadachim jovem, vento, rio, roupas brancas','espadachim rival wuxia, roupas brancas, margem de rio, olhar frio, arte xianxia cinematográfica']
+    ];
+    for (const seed of npcSeeds) {
+        await runQuery(`INSERT OR IGNORE INTO npcs (nome, localizacao, dialogo_inicial, opcoes, missao_id) VALUES (?, ?, ?, ?, NULL)`, [seed[0], seed[1], seed[2], '[]']);
+        const npc = await getQuery(`SELECT id FROM npcs WHERE nome = ? AND localizacao = ?`, [seed[0], seed[1]]);
+        if (npc) {
+            await runQuery(`INSERT OR REPLACE INTO npc_profiles (npc_id, titulo, personalidade, arquetipo, estilo, prompt_base) VALUES (?, ?, ?, ?, ?, ?)`, [npc.id, seed[3], seed[4], seed[5], seed[6], seed[7]]);
         }
     }
 
-    return await getPlayerById(player.id);
+    const herb = await getOrCreateItemByName('Erva do Orvalho Noturno', { tipo: 'material', raridade: 'Comum', efeito: 'Ingrediente espiritual', valor_venda: 8, valor_compra: 16 });
+    const bone = await getOrCreateItemByName('Fragmento de Osso Espiritual', { tipo: 'material', raridade: 'Incomum', efeito: 'Ingrediente de bestas espirituais', valor_venda: 12, valor_compra: 25 });
+    await getOrCreateItemByName('Selo de Jade Partido', { tipo: 'material', raridade: 'Raro', efeito: 'Vestígio de artefato antigo', valor_venda: 35, valor_compra: 70 });
+
+    const velhoLin = await getQuery(`SELECT id FROM npcs WHERE nome = 'Velho Lin' LIMIT 1`);
+    const madameXue = await getQuery(`SELECT id FROM npcs WHERE nome = 'Madame Xue' LIMIT 1`);
+    const mongeShen = await getQuery(`SELECT id FROM npcs WHERE nome = 'Monge Shen' LIMIT 1`);
+
+    if (velhoLin) await runQuery(`INSERT OR IGNORE INTO npc_quests (npc_id, nome, descricao, objetivo_tipo, objetivo_alvo, objetivo_quantidade, recompensa_ouro, recompensa_item_id, recompensa_merito, branch_benevolente, branch_pragmatica, branch_cruel) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [velhoLin.id, 'Ecos na Floresta Sombria', 'Derrote criaturas hostis na Floresta Sombria e retorne com o coração disciplinado.', 'kill', 'Lobo Selvagem', 2, 45, bone.id, 3, 'Velho Lin reconhece sua compaixão e abre um raro conselho sobre respiração.', 'Velho Lin aceita seu pragmatismo e entrega uma rota segura pela mata.', 'Velho Lin percebe o cheiro de sangue em você, mas ainda aproveita sua ferocidade.']);
+    if (madameXue) await runQuery(`INSERT OR IGNORE INTO npc_quests (npc_id, nome, descricao, objetivo_tipo, objetivo_alvo, objetivo_quantidade, recompensa_ouro, recompensa_item_id, recompensa_merito, branch_benevolente, branch_pragmatica, branch_cruel) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [madameXue.id, 'Perfume da Lua de Ameixa', 'Entregue ervas raras para Madame Xue preparar um lote especial de incenso espiritual.', 'item', 'Erva do Orvalho Noturno', 2, 35, herb.id, 2, 'A mercadora marca seu nome entre os clientes confiáveis.', 'A mercadora elogia sua eficiência e oferece informações úteis.', 'A mercadora sorri, mas nunca esquecerá sua ganância.']);
+    if (mongeShen) await runQuery(`INSERT OR IGNORE INTO npc_quests (npc_id, nome, descricao, objetivo_tipo, objetivo_alvo, objetivo_quantidade, recompensa_ouro, recompensa_item_id, recompensa_merito, branch_benevolente, branch_pragmatica, branch_cruel) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [mongeShen.id, 'Passos entre Sinos Antigos', 'Explore o Templo Antigo e retorne com a mente clara.', 'explore', 'Templo Antigo', 2, 55, null, 4, 'O monge aprofunda sua serenidade com um sutra oral.', 'O monge considera seu foco aceitável e lhe entrega um aviso sobre espíritos.', 'O monge detecta sua impaciência, mas ainda lhe concede passagem.']);
+
+    const sectSeeds = [
+        ['Wudang', 'Tang', -10, 'A tensão é fria, mas controlada.'],
+        ['Wudang', 'Murong', 12, 'Uma aliança cautelosa mantém as estradas seguras.'],
+        ['Shaolin', 'Emei', 18, 'As duas facções cooperam contra artes proibidas.'],
+        ['Namgung', 'Tang', -18, 'Velhas dívidas mancham as relações.'],
+        ['Pavilhão da Lua Sangrenta', 'Shaolin', -35, 'Sangue e sutras jamais concordaram.'],
+        ['Senda Demoníaca do Norte', 'Wudang', -40, 'O conflito é quase inevitável.']
+    ];
+    for (const [a, b, rel, desc] of sectSeeds) {
+        await runQuery(`INSERT OR IGNORE INTO sect_relations (fac_a, fac_b, relacao, descricao) VALUES (?, ?, ?, ?)`, [a, b, rel, desc]);
+        await runQuery(`INSERT OR IGNORE INTO sect_relations (fac_a, fac_b, relacao, descricao) VALUES (?, ?, ?, ?)`, [b, a, rel, desc]);
+    }
+    await runQuery(`INSERT OR IGNORE INTO changelog (versao, data, texto) VALUES (?, date('now'), ?)`, ['v3.0.0', 'Etapa 3: memória de NPC, rumores dinâmicos, eventos narrativos, mestres, rivais, política de seitas e retratos persistentes.']);
 }
 
-async function ensurePlayerExists(telefone, message) {
-    const player = await getPlayer(telefone);
-    if (!player) {
-        await sendReply(message, '❌ Você não está registrado! Use `/registrar <nome> <sexo>` para começar.');
-        return null;
+async function initializeNarrativeStats(player) {
+    if (!player) return player;
+    let almaMax = Number(player.alma_maxima || 0);
+    let almaAtual = Number(player.alma_atual || 0);
+    if (!almaMax || !almaAtual) {
+        almaMax = Math.max(50, Math.floor((Number(player.espirito || 10) * 4) + (Number(player.inteligencia || 10) * 2)));
+        almaAtual = almaMax;
+        await updatePlayer(player.id, 'alma_maxima', almaMax);
+        await updatePlayer(player.id, 'alma_atual', almaAtual);
     }
-    if (Number(player.banido || 0) === 1 && !isOwner(message, telefone)) {
-        await sendReply(message, '🚫 Seu acesso ao jogo está bloqueado.');
-        return null;
-    }
-    return await ensureStarterSetup(player);
+    if (player.merito == null) await updatePlayer(player.id, 'merito', 0);
+    return { ...player, alma_maxima: almaMax, alma_atual: almaAtual, merito: Number(player.merito || 0) };
 }
 
-async function handlePendingResponse(message) {
-    const telefone = getSenderId(message);
-    if (!telefone || !respostaPendente.has(telefone)) return false;
-    const pendente = respostaPendente.get(telefone);
-    if (!pendente || pendente.tipo !== 'registro') return false;
+async function getNpcProfile(npcId) { return getQuery(`SELECT * FROM npc_profiles WHERE npc_id = ?`, [npcId]); }
 
-    const rawBody = typeof message?.body === 'string' ? message.body.trim() : '';
-    const rawChoice = rawBody.startsWith(COMMAND_PREFIX) ? rawBody.slice(COMMAND_PREFIX.length).trim() : rawBody;
-    const escolha = parseInt(rawChoice, 10);
-    if (Number.isNaN(escolha) || escolha < 1 || escolha > 4) {
-        await sendReply(message, 'Resposta inválida. Digite apenas o número da opção (1 a 4).');
-        return true;
-    }
-
-    const perguntaIndex = pendente.dados.perguntaAtual;
-    const pergunta = pendente.perguntas[perguntaIndex];
-    if (!pergunta) {
-        respostaPendente.delete(telefone);
-        return true;
-    }
-
-    const opcao = pergunta.opcoes[escolha - 1];
-    pendente.dados.karmaTotal += opcao.karma;
-    pendente.dados.perguntaAtual++;
-    await pendente.enviarProxima(getChatId(message), pendente.dados);
-    return true;
+async function getOrCreateNpcRelation(playerId, npcId) {
+    await runQuery(`INSERT OR IGNORE INTO npc_relacoes (npc_id, player_id) VALUES (?, ?)`, [npcId, playerId]);
+    return getQuery(`SELECT * FROM npc_relacoes WHERE npc_id = ? AND player_id = ?`, [npcId, playerId]);
 }
 
-client.on('message', async (message) => {
+async function updateNpcRelation(playerId, npcId, delta = {}, memoryLine = null) {
+    const current = await getOrCreateNpcRelation(playerId, npcId);
+    const memoria = [current.memoria_curta, memoryLine].filter(Boolean).join(' | ').slice(-400);
+    await runQuery(`UPDATE npc_relacoes SET afinidade = ?, confianca = ?, medo = ?, favor = ?, memoria_curta = ?, ultima_interacao = ? WHERE npc_id = ? AND player_id = ?`, [
+        clamp(Number(current.afinidade || 0) + Number(delta.afinidade || 0), -100, 100),
+        clamp(Number(current.confianca || 0) + Number(delta.confianca || 0), -100, 100),
+        clamp(Number(current.medo || 0) + Number(delta.medo || 0), -100, 100),
+        clamp(Number(current.favor || 0) + Number(delta.favor || 0), -100, 100),
+        memoria,
+        nowIso(),
+        npcId,
+        playerId
+    ]);
+    return getQuery(`SELECT * FROM npc_relacoes WHERE npc_id = ? AND player_id = ?`, [npcId, playerId]);
+}
+
+async function getPlayerSeita(playerId) {
+    return getQuery(`SELECT s.* FROM seita_membros sm JOIN seitas s ON sm.seita_id = s.id WHERE sm.player_id = ? LIMIT 1`, [playerId]);
+}
+
+async function getOrAssignBond(player, bondType) {
+    let bond = await getQuery(`SELECT * FROM player_bonds WHERE player_id = ? AND bond_type = ?`, [player.id, bondType]);
+    if (bond) return bond;
+    if (bondType === 'mestre') {
+        const masters = await allQuery(`SELECT n.id, n.nome, n.localizacao, np.titulo FROM npcs n JOIN npc_profiles np ON np.npc_id = n.id WHERE np.arquetipo IN ('mestre','guardiao')`);
+        const chosen = masters[Math.floor(Math.random() * Math.max(1, masters.length))] || { id: 0, nome: 'Mestre Sem Rosto', localizacao: 'Montanhas Distantes', titulo: 'Recluso' };
+        const data = { provas: 0, ensinou: false, localizacao: chosen.localizacao, titulo: chosen.titulo };
+        await runQuery(`INSERT INTO player_bonds (player_id, bond_type, bond_key, bond_name, data_json) VALUES (?, ?, ?, ?, ?)`, [player.id, bondType, String(chosen.id), chosen.nome, JSON.stringify(data)]);
+    } else if (bondType === 'rival') {
+        const names = ['Han Jue', 'Su Lian', 'Qin Yue', 'Mo Chen', 'Ye Rong', 'Lan Ruoxi'];
+        const temperamentos = ['orgulhoso', 'frio', 'vingativo', 'genial', 'feroz'];
+        const chosenName = names[Math.floor(Math.random() * names.length)];
+        const data = { reino: Math.max(Number(player.nivel_fisico || 1), Number(player.nivel_espiritual || 1)), rancor: 12, ultima_vista: player.localizacao || 'Vila Inicial', temperamento: temperamentos[Math.floor(Math.random() * temperamentos.length)] };
+        await runQuery(`INSERT INTO player_bonds (player_id, bond_type, bond_key, bond_name, data_json) VALUES (?, ?, ?, ?, ?)`, [player.id, bondType, normalizeKey(chosenName), chosenName, JSON.stringify(data)]);
+    }
+    return getQuery(`SELECT * FROM player_bonds WHERE player_id = ? AND bond_type = ?`, [player.id, bondType]);
+}
+
+async function callOptionalAI(prompt, fallbackText) {
+    if (AI_PROVIDER !== 'ollama') return fallbackText;
     try {
-        const body = typeof message?.body === 'string' ? message.body.trim() : '';
-        if (!body || body.startsWith(COMMAND_PREFIX)) return;
-        await handlePendingResponse(message);
+        const res = await fetch(OLLAMA_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model: OLLAMA_MODEL, stream: false, prompt, options: { temperature: 0.85, top_p: 0.92 } })
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        return sanitizeText(data?.response || '') || fallbackText;
     } catch (err) {
-        log(`Erro ao processar resposta pendente: ${err?.stack || err}`, 'ERRO');
+        log(`IA opcional indisponível, usando fallback: ${err?.message || err}`, 'INFO');
+        return fallbackText;
     }
-});
-
-async function ensureSchemaUpdates() {
-    await safeRun(`ALTER TABLE players ADD COLUMN alma_atual INTEGER DEFAULT 50`);
-    await safeRun(`ALTER TABLE players ADD COLUMN alma_maxima INTEGER DEFAULT 50`);
-    await safeRun(`ALTER TABLE players ADD COLUMN merito INTEGER DEFAULT 0`);
-    await safeRun(`ALTER TABLE players ADD COLUMN banido INTEGER DEFAULT 0`);
-
-    await safeRun(`ALTER TABLE itens ADD COLUMN slot TEXT`);
-    await safeRun(`ALTER TABLE itens ADD COLUMN equipavel INTEGER DEFAULT 0`);
-    await safeRun(`ALTER TABLE itens ADD COLUMN bonus_forca INTEGER DEFAULT 0`);
-    await safeRun(`ALTER TABLE itens ADD COLUMN bonus_vigor INTEGER DEFAULT 0`);
-    await safeRun(`ALTER TABLE itens ADD COLUMN bonus_defesa INTEGER DEFAULT 0`);
-    await safeRun(`ALTER TABLE itens ADD COLUMN bonus_inteligencia INTEGER DEFAULT 0`);
-    await safeRun(`ALTER TABLE itens ADD COLUMN bonus_espirito INTEGER DEFAULT 0`);
-    await safeRun(`ALTER TABLE itens ADD COLUMN bonus_agilidade INTEGER DEFAULT 0`);
-    await safeRun(`ALTER TABLE itens ADD COLUMN bonus_hp INTEGER DEFAULT 0`);
-    await safeRun(`ALTER TABLE itens ADD COLUMN bonus_qi INTEGER DEFAULT 0`);
-    await safeRun(`ALTER TABLE itens ADD COLUMN bonus_alma INTEGER DEFAULT 0`);
-    await safeRun(`ALTER TABLE itens ADD COLUMN stackavel INTEGER DEFAULT 1`);
-
-    await safeRun(`DROP TABLE IF EXISTS inventario_dedup`);
-    await safeRun(`CREATE TABLE inventario_dedup AS SELECT MIN(id) AS id, player_id, item_id, SUM(COALESCE(quantidade,1)) AS quantidade FROM inventario GROUP BY player_id, item_id`);
-    await safeRun(`DELETE FROM inventario`);
-    await safeRun(`INSERT INTO inventario (id, player_id, item_id, quantidade) SELECT id, player_id, item_id, quantidade FROM inventario_dedup`);
-    await safeRun(`DROP TABLE IF EXISTS inventario_dedup`);
-
-    await safeRun(`DROP TABLE IF EXISTS equipamentos_dedup`);
-    await safeRun(`CREATE TABLE equipamentos_dedup AS SELECT MIN(rowid) AS rowid_keep, player_id, item_id, slot FROM equipamentos GROUP BY player_id, slot`);
-    await safeRun(`DELETE FROM equipamentos WHERE rowid NOT IN (SELECT rowid_keep FROM equipamentos_dedup)`);
-    await safeRun(`DROP TABLE IF EXISTS equipamentos_dedup`);
-
-    await safeRun(`DELETE FROM profissoes WHERE rowid NOT IN (SELECT MAX(rowid) FROM profissoes GROUP BY player_id)`);
-    await safeRun(`DELETE FROM tecnicas_aprendidas WHERE rowid NOT IN (SELECT MAX(rowid) FROM tecnicas_aprendidas GROUP BY player_id, tecnica_id)`);
-
-    await safeRun(`CREATE UNIQUE INDEX IF NOT EXISTS idx_inventario_unique ON inventario(player_id, item_id)`);
-    await safeRun(`CREATE UNIQUE INDEX IF NOT EXISTS idx_equipamentos_unique ON equipamentos(player_id, slot)`);
-    await safeRun(`CREATE UNIQUE INDEX IF NOT EXISTS idx_profissoes_unique ON profissoes(player_id)`);
-    await safeRun(`CREATE UNIQUE INDEX IF NOT EXISTS idx_tecnicas_unique ON tecnicas_aprendidas(player_id, tecnica_id)`);
-    await safeRun(`CREATE UNIQUE INDEX IF NOT EXISTS idx_seita_membros_unique ON seita_membros(player_id)`);
-    await safeRun(`CREATE UNIQUE INDEX IF NOT EXISTS idx_biblioteca_unique ON biblioteca_seita(seita_id, tecnica_id)`);
-
-    await safeRun(`CREATE TABLE IF NOT EXISTS receitas_craft (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        profissao TEXT NOT NULL,
-        nome TEXT NOT NULL,
-        resultado_item_id INTEGER NOT NULL,
-        resultado_quantidade INTEGER DEFAULT 1,
-        nivel_necessario INTEGER DEFAULT 1,
-        custo_ouro INTEGER DEFAULT 0,
-        chance_base INTEGER DEFAULT 80,
-        xp_ganho INTEGER DEFAULT 20,
-        descricao TEXT,
-        FOREIGN KEY(resultado_item_id) REFERENCES itens(id)
-    )`);
-
-    await safeRun(`CREATE TABLE IF NOT EXISTS receita_ingredientes (
-        receita_id INTEGER,
-        item_id INTEGER,
-        quantidade INTEGER DEFAULT 1,
-        FOREIGN KEY(receita_id) REFERENCES receitas_craft(id),
-        FOREIGN KEY(item_id) REFERENCES itens(id)
-    )`);
-
-    await safeRun(`CREATE TABLE IF NOT EXISTS bosses_regiao (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        nome TEXT,
-        localizacao TEXT,
-        descricao TEXT,
-        nivel INTEGER DEFAULT 1,
-        hp_base INTEGER DEFAULT 100,
-        ataque_base INTEGER DEFAULT 20,
-        defesa_base INTEGER DEFAULT 10,
-        recompensa_ouro INTEGER DEFAULT 50,
-        recompensa_merito INTEGER DEFAULT 1,
-        drop_item_id INTEGER,
-        drop_quantidade INTEGER DEFAULT 1,
-        FOREIGN KEY(drop_item_id) REFERENCES itens(id)
-    )`);
-
-    await safeRun(`CREATE TABLE IF NOT EXISTS quests_npc (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        npc_id INTEGER,
-        titulo TEXT,
-        descricao TEXT,
-        objetivo_tipo TEXT,
-        alvo_nome TEXT,
-        item_id INTEGER,
-        quantidade INTEGER DEFAULT 1,
-        recompensa_ouro INTEGER DEFAULT 0,
-        recompensa_item_id INTEGER,
-        recompensa_merito INTEGER DEFAULT 0,
-        FOREIGN KEY(npc_id) REFERENCES npcs(id),
-        FOREIGN KEY(item_id) REFERENCES itens(id),
-        FOREIGN KEY(recompensa_item_id) REFERENCES itens(id)
-    )`);
-
-    await safeRun(`CREATE TABLE IF NOT EXISTS player_quests (
-        player_id INTEGER,
-        quest_id INTEGER,
-        progresso INTEGER DEFAULT 0,
-        status TEXT DEFAULT 'em_andamento',
-        started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY(player_id) REFERENCES players(id),
-        FOREIGN KEY(quest_id) REFERENCES quests_npc(id)
-    )`);
-
-    await safeRun(`CREATE UNIQUE INDEX IF NOT EXISTS idx_player_quests_unique ON player_quests(player_id, quest_id)`);
-
-    await seedGameplayData();
-    await safeRun(`UPDATE players SET merito = COALESCE(merito, 0), banido = COALESCE(banido, 0)`);
-    await safeRun(`UPDATE players SET alma_maxima = CASE WHEN alma_maxima IS NULL OR alma_maxima <= 0 THEN MAX(50, (COALESCE(espirito,0) + COALESCE(inteligencia,0)) * 2) ELSE alma_maxima END`);
-    await safeRun(`UPDATE players SET alma_atual = CASE WHEN alma_atual IS NULL OR alma_atual <= 0 THEN alma_maxima ELSE alma_atual END`);
 }
 
-async function seedGameplayData() {
-    const itemDefs = [
-        { nome: 'Erva Calmante', tipo: 'material', raridade: 'Comum', efeito: 'Ingrediente herbal.', valor_venda: 3, valor_compra: 8 },
-        { nome: 'Essência Espiritual', tipo: 'material', raridade: 'Comum', efeito: 'Condensa energia espiritual.', valor_venda: 6, valor_compra: 14 },
-        { nome: 'Minério Rústico', tipo: 'material', raridade: 'Comum', efeito: 'Minério bruto para forja.', valor_venda: 5, valor_compra: 12 },
-        { nome: 'Pele de Lobo', tipo: 'material', raridade: 'Comum', efeito: 'Couro leve de fera.', valor_venda: 5, valor_compra: 12 },
-        { nome: 'Presa Feral', tipo: 'material', raridade: 'Incomum', efeito: 'Presa com energia bestial.', valor_venda: 8, valor_compra: 18 },
-        { nome: 'Seda de Aranha', tipo: 'material', raridade: 'Incomum', efeito: 'Fio resistente e flexível.', valor_venda: 8, valor_compra: 18 },
-        { nome: 'Fragmento de Jade', tipo: 'material', raridade: 'Incomum', efeito: 'Fragmento espiritual lapidável.', valor_venda: 12, valor_compra: 28 },
-        { nome: 'Núcleo Sombrio', tipo: 'material', raridade: 'Raro', efeito: 'Núcleo de energia corrompida.', valor_venda: 20, valor_compra: 50 },
-        { nome: 'Sangue Demoníaco', tipo: 'material', raridade: 'Raro', efeito: 'Sangue fervilhante de criatura demoníaca.', valor_venda: 24, valor_compra: 60 },
-        { nome: 'Cristal Tempestuoso', tipo: 'material', raridade: 'Raro', efeito: 'Cristal carregado por relâmpagos.', valor_venda: 28, valor_compra: 70 },
-        { nome: 'Pílula Condensadora de Qi', tipo: 'pilula', raridade: 'Incomum', efeito: 'Restaura 80 Qi', valor_venda: 16, valor_compra: 32, stackavel: 1 },
-        { nome: 'Pílula Revitalizante', tipo: 'pilula', raridade: 'Incomum', efeito: 'Restaura 100 HP', valor_venda: 18, valor_compra: 36, stackavel: 1 },
-        { nome: 'Elixir da Alma', tipo: 'pilula', raridade: 'Raro', efeito: 'Restaura 40 Alma', valor_venda: 22, valor_compra: 44, stackavel: 1 },
-        { nome: 'Bálsamo Vital', tipo: 'pilula', raridade: 'Comum', efeito: 'Restaura 60 HP', valor_venda: 10, valor_compra: 24, stackavel: 1 },
-        { nome: 'Tônico da Alma', tipo: 'pilula', raridade: 'Incomum', efeito: 'Restaura 35 Alma', valor_venda: 16, valor_compra: 32, stackavel: 1 },
-        { nome: 'Espada de Ferro', tipo: 'arma', raridade: 'Comum', efeito: 'Uma lâmina firme para iniciantes.', valor_venda: 30, valor_compra: 65, slot: 'arma', equipavel: 1, stackavel: 0, bonus_forca: 6, bonus_agilidade: 1 },
-        { nome: 'Armadura de Couro', tipo: 'armadura', raridade: 'Comum', efeito: 'Proteção leve e flexível.', valor_venda: 28, valor_compra: 60, slot: 'armadura', equipavel: 1, stackavel: 0, bonus_defesa: 6, bonus_hp: 25 },
-        { nome: 'Botas do Caçador', tipo: 'botas', raridade: 'Incomum', efeito: 'Passos leves e precisos.', valor_venda: 24, valor_compra: 52, slot: 'botas', equipavel: 1, stackavel: 0, bonus_agilidade: 4, bonus_defesa: 1 },
-        { nome: 'Talismã do Trovão', tipo: 'talisma', raridade: 'Incomum', efeito: 'Canaliza eletricidade espiritual.', valor_venda: 26, valor_compra: 58, slot: 'talisma', equipavel: 1, stackavel: 0, bonus_inteligencia: 4, bonus_agilidade: 2, bonus_qi: 15 },
-        { nome: 'Talismã Escarlate', tipo: 'talisma', raridade: 'Raro', efeito: 'Canaliza ímpeto sanguíneo.', valor_venda: 35, valor_compra: 78, slot: 'talisma', equipavel: 1, stackavel: 0, bonus_forca: 4, bonus_espirito: 2, bonus_qi: 12 },
-        { nome: 'Núcleo da Barreira', tipo: 'artefato', raridade: 'Raro', efeito: 'Artefato de suporte defensivo.', valor_venda: 40, valor_compra: 90, slot: 'artefato', equipavel: 1, stackavel: 0, bonus_defesa: 5, bonus_hp: 20, bonus_qi: 10 },
-        { nome: 'Bandeira da Formação', tipo: 'artefato', raridade: 'Raro', efeito: 'Amplifica o fluxo espiritual em combate.', valor_venda: 42, valor_compra: 92, slot: 'artefato', equipavel: 1, stackavel: 0, bonus_espirito: 5, bonus_alma: 15 },
-        { nome: 'Amuleto Espiritual', tipo: 'amuleto', raridade: 'Incomum', efeito: 'Amuleto simples de foco interno.', valor_venda: 22, valor_compra: 48, slot: 'amuleto', equipavel: 1, stackavel: 0, bonus_espirito: 3, bonus_qi: 10, bonus_alma: 10 }
-    ];
-
-    const items = {};
-    for (const def of itemDefs) {
-        items[def.nome] = await getOrCreateItemByName(def.nome, def);
-    }
-
-    await safeRun(`INSERT OR IGNORE INTO loja_rpg (item_id, moeda_tipo, preco) VALUES (?, 'ouro', ?)`, [items['Amuleto Espiritual'].id, 48]);
-
-    const npcDefs = [
-        { nome: 'Ancião Mu', localizacao: 'Floresta Sombria', dialogo_inicial: 'A floresta anda inquieta. As feras estão mais agressivas do que o normal.' },
-        { nome: 'Ferreiro Han', localizacao: 'Vila Inicial', dialogo_inicial: 'Traga materiais de qualidade e eu lhe ensinarei como sobreviver.' },
-        { nome: 'Curandeira Lin', localizacao: 'Vila Inicial', dialogo_inicial: 'O corpo cai, a alma vacila, mas ambos podem ser restaurados.' },
-        { nome: 'Mestre Qiao', localizacao: 'Templo Antigo', dialogo_inicial: 'As ruínas guardam ecos de formações antigas e espíritos rancorosos.' }
-    ];
-
-    for (const npc of npcDefs) {
-        const existing = await getQuery(`SELECT id FROM npcs WHERE nome = ? AND localizacao = ?`, [npc.nome, npc.localizacao]);
-        if (!existing) {
-            await runQuery(`INSERT INTO npcs (nome, localizacao, dialogo_inicial, opcoes, missao_id) VALUES (?, ?, ?, '', NULL)`, [npc.nome, npc.localizacao, npc.dialogo_inicial]);
-        }
-    }
-
-    const npcRows = await allQuery(`SELECT * FROM npcs`);
-    const npcMap = Object.fromEntries(npcRows.map((row) => [`${row.nome}|${row.localizacao}`, row]));
-
-    const questDefs = [
-        {
-            npc: 'Ancião Mu|Floresta Sombria',
-            titulo: 'Lobos na Névoa',
-            descricao: 'Derrote 3 Lobo Cinzento para aliviar a pressão sobre a trilha da floresta.',
-            objetivo_tipo: 'kill_mob',
-            alvo_nome: 'Lobo Cinzento',
-            quantidade: 3,
-            recompensa_ouro: 45,
-            recompensa_item_id: items['Pílula Condensadora de Qi'].id,
-            recompensa_merito: 2
-        },
-        {
-            npc: 'Ferreiro Han|Vila Inicial',
-            titulo: 'Minério para a Forja',
-            descricao: 'Reúna 4 Minério Rústico para reforçar a oficina do ferreiro.',
-            objetivo_tipo: 'collect_item',
-            item_id: items['Minério Rústico'].id,
-            alvo_nome: 'Minério Rústico',
-            quantidade: 4,
-            recompensa_ouro: 40,
-            recompensa_item_id: items['Espada de Ferro'].id,
-            recompensa_merito: 3
-        },
-        {
-            npc: 'Curandeira Lin|Vila Inicial',
-            titulo: 'Ervas para o Sopro Vital',
-            descricao: 'Colete 5 Erva Calmante para preparar bálsamos curativos.',
-            objetivo_tipo: 'collect_item',
-            item_id: items['Erva Calmante'].id,
-            alvo_nome: 'Erva Calmante',
-            quantidade: 5,
-            recompensa_ouro: 35,
-            recompensa_item_id: items['Bálsamo Vital'].id,
-            recompensa_merito: 2
-        },
-        {
-            npc: 'Mestre Qiao|Templo Antigo',
-            titulo: 'Purificar as Ruínas',
-            descricao: 'Derrote 2 Esqueleto Guerreiro dentro das ruínas antigas.',
-            objetivo_tipo: 'kill_mob',
-            alvo_nome: 'Esqueleto Guerreiro',
-            quantidade: 2,
-            recompensa_ouro: 80,
-            recompensa_item_id: items['Núcleo da Barreira'].id,
-            recompensa_merito: 5
-        }
-    ];
-
-    for (const quest of questDefs) {
-        const npc = npcMap[quest.npc];
-        if (!npc) continue;
-        const existing = await getQuery(`SELECT id FROM quests_npc WHERE npc_id = ? AND titulo = ?`, [npc.id, quest.titulo]);
-        if (!existing) {
-            await runQuery(
-                `INSERT INTO quests_npc (npc_id, titulo, descricao, objetivo_tipo, alvo_nome, item_id, quantidade, recompensa_ouro, recompensa_item_id, recompensa_merito)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [npc.id, quest.titulo, quest.descricao, quest.objetivo_tipo, quest.alvo_nome, quest.item_id || null, quest.quantidade, quest.recompensa_ouro, quest.recompensa_item_id || null, quest.recompensa_merito || 0]
-            );
-        }
-    }
-
-    const bossDefs = [
-        { nome: 'Lobo Alfa da Névoa', localizacao: 'Floresta Sombria', descricao: 'Um alfa colossal envolto em bruma maldita.', nivel: 2, hp_base: 180, ataque_base: 24, defesa_base: 10, recompensa_ouro: 70, recompensa_merito: 5, drop_item_id: items['Presa Feral'].id, drop_quantidade: 2 },
-        { nome: 'Matriarca Aracnídea', localizacao: 'Ruínas Antigas', descricao: 'Uma aranha ancestral que tece seda espiritual.', nivel: 4, hp_base: 240, ataque_base: 30, defesa_base: 12, recompensa_ouro: 110, recompensa_merito: 7, drop_item_id: items['Seda de Aranha'].id, drop_quantidade: 3 },
-        { nome: 'Guardião de Jade Partido', localizacao: 'Templo Antigo', descricao: 'Estátua viva que pulsa com energia de formações antigas.', nivel: 5, hp_base: 300, ataque_base: 36, defesa_base: 18, recompensa_ouro: 150, recompensa_merito: 9, drop_item_id: items['Fragmento de Jade'].id, drop_quantidade: 2 },
-        { nome: 'Serpente do Trovão', localizacao: 'Pico da Tempestade', descricao: 'Serpente rara banhada em raios celestes.', nivel: 7, hp_base: 360, ataque_base: 42, defesa_base: 20, recompensa_ouro: 220, recompensa_merito: 12, drop_item_id: items['Cristal Tempestuoso'].id, drop_quantidade: 2 }
-    ];
-
-    for (const boss of bossDefs) {
-        const existing = await getQuery(`SELECT id FROM bosses_regiao WHERE nome = ? AND localizacao = ?`, [boss.nome, boss.localizacao]);
-        if (!existing) {
-            await runQuery(
-                `INSERT INTO bosses_regiao (nome, localizacao, descricao, nivel, hp_base, ataque_base, defesa_base, recompensa_ouro, recompensa_merito, drop_item_id, drop_quantidade)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [boss.nome, boss.localizacao, boss.descricao, boss.nivel, boss.hp_base, boss.ataque_base, boss.defesa_base, boss.recompensa_ouro, boss.recompensa_merito, boss.drop_item_id, boss.drop_quantidade]
-            );
-        }
-    }
-
-    const recipes = [
-        { profissao: 'alquimista', nome: 'Pílula Condensadora de Qi', resultado: 'Pílula Condensadora de Qi', quantidade: 1, nivel: 1, custo: 6, chance: 85, xp: 28, descricao: 'Condensa energia espiritual em forma de pílula.', ingredientes: { 'Erva Calmante': 2, 'Essência Espiritual': 1 } },
-        { profissao: 'alquimista', nome: 'Pílula Revitalizante', resultado: 'Pílula Revitalizante', quantidade: 1, nivel: 2, custo: 8, chance: 80, xp: 34, descricao: 'Mistura medicinal para restaurar o corpo.', ingredientes: { 'Erva Calmante': 2, 'Pele de Lobo': 1, 'Essência Espiritual': 1 } },
-        { profissao: 'alquimista', nome: 'Elixir da Alma', resultado: 'Elixir da Alma', quantidade: 1, nivel: 3, custo: 12, chance: 72, xp: 45, descricao: 'Fortalece a alma durante provações espirituais.', ingredientes: { 'Essência Espiritual': 2, 'Fragmento de Jade': 1, 'Núcleo Sombrio': 1 } },
-        { profissao: 'forjador', nome: 'Espada de Ferro', resultado: 'Espada de Ferro', quantidade: 1, nivel: 1, custo: 10, chance: 82, xp: 30, descricao: 'Lâmina confiável para cultivadores iniciantes.', ingredientes: { 'Minério Rústico': 3, 'Presa Feral': 1 } },
-        { profissao: 'forjador', nome: 'Armadura de Couro', resultado: 'Armadura de Couro', quantidade: 1, nivel: 1, custo: 10, chance: 82, xp: 30, descricao: 'Proteção feita com couro reforçado.', ingredientes: { 'Pele de Lobo': 3, 'Seda de Aranha': 1 } },
-        { profissao: 'forjador', nome: 'Botas do Caçador', resultado: 'Botas do Caçador', quantidade: 1, nivel: 2, custo: 12, chance: 78, xp: 36, descricao: 'Botas leves para movimentação rápida.', ingredientes: { 'Pele de Lobo': 2, 'Seda de Aranha': 2, 'Minério Rústico': 1 } },
-        { profissao: 'medico', nome: 'Bálsamo Vital', resultado: 'Bálsamo Vital', quantidade: 1, nivel: 1, custo: 6, chance: 88, xp: 24, descricao: 'Unguento aplicado para fechar ferimentos.', ingredientes: { 'Erva Calmante': 3, 'Essência Espiritual': 1 } },
-        { profissao: 'medico', nome: 'Tônico da Alma', resultado: 'Tônico da Alma', quantidade: 1, nivel: 2, custo: 9, chance: 76, xp: 32, descricao: 'Poção calmante para restaurar a alma.', ingredientes: { 'Erva Calmante': 2, 'Fragmento de Jade': 1, 'Essência Espiritual': 1 } },
-        { profissao: 'mestre_talisma', nome: 'Talismã do Trovão', resultado: 'Talismã do Trovão', quantidade: 1, nivel: 2, custo: 14, chance: 74, xp: 40, descricao: 'Talismã que amplifica reflexos e Qi.', ingredientes: { 'Fragmento de Jade': 2, 'Cristal Tempestuoso': 1, 'Seda de Aranha': 1 } },
-        { profissao: 'mestre_talisma', nome: 'Talismã Escarlate', resultado: 'Talismã Escarlate', quantidade: 1, nivel: 3, custo: 18, chance: 68, xp: 50, descricao: 'Talismã agressivo com essência sanguínea.', ingredientes: { 'Sangue Demoníaco': 1, 'Fragmento de Jade': 2, 'Essência Espiritual': 1 } },
-        { profissao: 'mestre_formacoes', nome: 'Núcleo da Barreira', resultado: 'Núcleo da Barreira', quantidade: 1, nivel: 2, custo: 16, chance: 70, xp: 42, descricao: 'Âncora para formações defensivas.', ingredientes: { 'Fragmento de Jade': 2, 'Núcleo Sombrio': 1, 'Minério Rústico': 2 } },
-        { profissao: 'mestre_formacoes', nome: 'Bandeira da Formação', resultado: 'Bandeira da Formação', quantidade: 1, nivel: 3, custo: 20, chance: 66, xp: 54, descricao: 'Conduz energia espiritual dentro de formações.', ingredientes: { 'Seda de Aranha': 2, 'Fragmento de Jade': 2, 'Essência Espiritual': 2 } }
-    ];
-
-    for (const recipe of recipes) {
-        const resultItem = items[recipe.resultado] || await getOrCreateItemByName(recipe.resultado, { tipo: 'especial', raridade: 'Comum', efeito: 'Resultado de craft', valor_venda: 10, valor_compra: 20 });
-        let existing = await getQuery(`SELECT id FROM receitas_craft WHERE profissao = ? AND nome = ?`, [recipe.profissao, recipe.nome]);
-        if (!existing) {
-            const result = await runQuery(
-                `INSERT INTO receitas_craft (profissao, nome, resultado_item_id, resultado_quantidade, nivel_necessario, custo_ouro, chance_base, xp_ganho, descricao)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [recipe.profissao, recipe.nome, resultItem.id, recipe.quantidade, recipe.nivel, recipe.custo, recipe.chance, recipe.xp, recipe.descricao]
-            );
-            existing = { id: result.lastID };
-        } else {
-            await runQuery(
-                `UPDATE receitas_craft SET resultado_item_id = ?, resultado_quantidade = ?, nivel_necessario = ?, custo_ouro = ?, chance_base = ?, xp_ganho = ?, descricao = ? WHERE id = ?`,
-                [resultItem.id, recipe.quantidade, recipe.nivel, recipe.custo, recipe.chance, recipe.xp, recipe.descricao, existing.id]
-            );
-            await runQuery(`DELETE FROM receita_ingredientes WHERE receita_id = ?`, [existing.id]);
-        }
-
-        for (const [itemName, qtd] of Object.entries(recipe.ingredientes)) {
-            const ingredientItem = items[itemName] || await getOrCreateItemByName(itemName, { tipo: 'material', raridade: 'Comum', efeito: 'Ingrediente' });
-            await runQuery(`INSERT INTO receita_ingredientes (receita_id, item_id, quantidade) VALUES (?, ?, ?)`, [existing.id, ingredientItem.id, qtd]);
-        }
-    }
-
-    await safeRun(`INSERT OR IGNORE INTO changelog (versao, data, texto) VALUES ('v2.0.0', date('now'), 'V2 de gameplay: tribulação, equipamentos com bônus, craft com qualidade, bosses por região, quests de NPC e novo perfil RPG.')`);
+function buildEntityPrompt(entityType, entityKey, extra = '') {
+    if (entityType === 'npc') return `${entityKey}, personagem wuxia/xianxia, retrato vertical, pintura digital refinada, atmosfera mística, ${extra}`.trim();
+    if (entityType === 'mob') return `${entityKey}, criatura espiritual wuxia/xianxia, arte detalhada, fundo atmosférico, ${extra}`.trim();
+    if (entityType === 'regiao') return `${entityKey}, paisagem wuxia/xianxia, fantasia oriental, pintura digital cinematográfica, ${extra}`.trim();
+    return `${entityKey}, fantasia oriental wuxia/xianxia, ${extra}`.trim();
 }
 
-const duelosPendentes = new Map();
-const REGION_MOBS = {
-    'floresta sombria': [
-        { nome: 'Lobo Cinzento', hp: 65, ataque: 14, defesa: 6, ouro: [7, 14], drops: [ ['Pele de Lobo', 75, 1, 2], ['Presa Feral', 20, 1, 1], ['Erva Calmante', 25, 1, 1] ] },
-        { nome: 'Goblin Ladrão', hp: 58, ataque: 16, defesa: 5, ouro: [8, 16], drops: [ ['Minério Rústico', 40, 1, 2], ['Essência Espiritual', 35, 1, 1] ] },
-        { nome: 'Aranha Tecedeira', hp: 72, ataque: 13, defesa: 8, ouro: [9, 17], drops: [ ['Seda de Aranha', 70, 1, 2], ['Essência Espiritual', 30, 1, 1] ] }
-    ],
-    'vila inicial': [
-        { nome: 'Rato Espiritual', hp: 38, ataque: 8, defesa: 3, ouro: [3, 8], drops: [ ['Erva Calmante', 35, 1, 1], ['Essência Espiritual', 15, 1, 1] ] },
-        { nome: 'Javali Ferino', hp: 82, ataque: 18, defesa: 10, ouro: [10, 18], drops: [ ['Presa Feral', 45, 1, 1], ['Pele de Lobo', 25, 1, 1], ['Minério Rústico', 20, 1, 1] ] }
-    ],
-    'ruinas antigas': [
-        { nome: 'Esqueleto Guerreiro', hp: 90, ataque: 22, defesa: 12, ouro: [14, 24], drops: [ ['Osso Antigo', 70, 1, 2], ['Fragmento de Jade', 20, 1, 1], ['Essência Espiritual', 30, 1, 1] ] },
-        { nome: 'Espírito Vingativo', hp: 88, ataque: 24, defesa: 9, ouro: [16, 26], drops: [ ['Núcleo Sombrio', 18, 1, 1], ['Essência Espiritual', 40, 1, 2] ] }
-    ],
-    'templo antigo': [
-        { nome: 'Esqueleto Guerreiro', hp: 95, ataque: 22, defesa: 12, ouro: [15, 25], drops: [ ['Osso Antigo', 75, 1, 2], ['Fragmento de Jade', 25, 1, 1] ] },
-        { nome: 'Guardião Rúnico', hp: 120, ataque: 28, defesa: 16, ouro: [20, 30], drops: [ ['Fragmento de Jade', 55, 1, 2], ['Essência Espiritual', 35, 1, 2] ] }
-    ],
-    'pico da tempestade': [
-        { nome: 'Falcão Relampejante', hp: 132, ataque: 34, defesa: 14, ouro: [25, 38], drops: [ ['Cristal Tempestuoso', 45, 1, 1], ['Essência Espiritual', 35, 1, 2] ] }
-    ]
-};
 
-const QUALITY_TIERS = [
-    { key: 'comum', label: 'Comum', mult: 1.0, threshold: 60 },
-    { key: 'refinado', label: 'Refinado', mult: 1.15, threshold: 85 },
-    { key: 'superior', label: 'Superior', mult: 1.3, threshold: 96 },
-    { key: 'perfeito', label: 'Perfeito', mult: 1.5, threshold: 101 }
-];
-
-function chooseMobForLocation(localizacao) {
-    const key = normalizeKey(localizacao);
-    const pool = REGION_MOBS[key] || REGION_MOBS['floresta sombria'];
-    return pool[Math.floor(Math.random() * pool.length)];
+async function fetchImageToFile(url, outPath) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), IMAGE_TIMEOUT_MS);
+    try {
+        const res = await fetch(url, { signal: controller.signal });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        fs.writeFileSync(outPath, Buffer.from(await res.arrayBuffer()));
+        return outPath;
+    } finally {
+        clearTimeout(timer);
+    }
 }
 
-async function createQualityVariant(baseItem, qualityLabel) {
-    if (!baseItem || qualityLabel === 'Comum') return baseItem;
-    const mult = QUALITY_TIERS.find((q) => q.label === qualityLabel)?.mult || 1;
-    const suffixName = `${baseItem.nome} [${qualityLabel}]`;
-    const scaledEffect = String(baseItem.efeito || '').replace(/(\d+)/g, (m) => String(Math.max(1, Math.round(Number(m) * mult))));
-    return await getOrCreateItemByName(suffixName, {
-        tipo: baseItem.tipo,
-        raridade: qualityLabel,
-        efeito: scaledEffect || baseItem.efeito,
-        valor_venda: Math.max(1, Math.round(Number(baseItem.valor_venda || 0) * mult)),
-        valor_compra: Math.max(1, Math.round(Number(baseItem.valor_compra || 0) * mult)),
-        moeda_tipo: baseItem.moeda_tipo || 'ouro',
-        slot: baseItem.slot || inferSlotFromItem(baseItem),
-        equipavel: Number(baseItem.equipavel || 0),
-        stackavel: Number(baseItem.stackavel ?? 1),
-        bonus_forca: Math.round(Number(baseItem.bonus_forca || 0) * mult),
-        bonus_vigor: Math.round(Number(baseItem.bonus_vigor || 0) * mult),
-        bonus_defesa: Math.round(Number(baseItem.bonus_defesa || 0) * mult),
-        bonus_inteligencia: Math.round(Number(baseItem.bonus_inteligencia || 0) * mult),
-        bonus_espirito: Math.round(Number(baseItem.bonus_espirito || 0) * mult),
-        bonus_agilidade: Math.round(Number(baseItem.bonus_agilidade || 0) * mult),
-        bonus_hp: Math.round(Number(baseItem.bonus_hp || 0) * mult),
-        bonus_qi: Math.round(Number(baseItem.bonus_qi || 0) * mult),
-        bonus_alma: Math.round(Number(baseItem.bonus_alma || 0) * mult)
+function relativeAssetPath(filePath) {
+    try {
+        return path.relative(__dirname, filePath).replace(/\\/g, '/');
+    } catch (_err) {
+        return path.basename(filePath || '');
+    }
+}
+function buildPublicUrlFromBase(filePath) {
+    if (!IMAGE_PUBLIC_BASE_URL || !filePath) return null;
+    const base = String(IMAGE_PUBLIC_BASE_URL).replace(/\/$/, '');
+    return `${base}/${relativeAssetPath(filePath)}`;
+}
+function fileToBase64(filePath) {
+    return fs.readFileSync(filePath).toString('base64');
+}
+function guessMimeType(filePath) {
+    const ext = String(path.extname(filePath || '')).toLowerCase();
+    if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
+    if (ext === '.webp') return 'image/webp';
+    if (ext === '.gif') return 'image/gif';
+    return 'image/png';
+}
+function computeFileHash(filePath) {
+    if (!filePath || !fs.existsSync(filePath)) return null;
+    return crypto.createHash('md5').update(fs.readFileSync(filePath)).digest('hex');
+}
+
+async function uploadToImgBB(filePath, entityType, entityKey) {
+    if (!IMGBB_API_KEY) throw new Error('IMGBB_API_KEY não configurada');
+    const form = new FormData();
+    form.append('image', fileToBase64(filePath));
+    form.append('name', `${entityType}_${normalizeKey(entityKey).replace(/\s+/g, '_') || 'retrato'}`);
+    const response = await fetch(`https://api.imgbb.com/1/upload?key=${encodeURIComponent(IMGBB_API_KEY)}`, {
+        method: 'POST',
+        body: form
     });
+    if (!response.ok) throw new Error(`ImgBB HTTP ${response.status}`);
+    const data = await response.json();
+    const url = data?.data?.url || data?.data?.display_url || data?.data?.image?.url;
+    if (!url) throw new Error('ImgBB não retornou URL');
+    return { publicUrl: url, hostProvider: 'imgbb' };
 }
 
-function rollCraftQuality(player, profLevel) {
-    const fortune = Number(player.fortuna || 0);
-    const score = rollDice(100) + Math.floor((profLevel || 1) * 2) + Math.floor(fortune / 12);
-    if (score >= 98) return 'Perfeito';
-    if (score >= 88) return 'Superior';
-    if (score >= 72) return 'Refinado';
-    return 'Comum';
+async function uploadToImageKit(filePath, entityType, entityKey) {
+    if (!IMAGEKIT_PRIVATE_KEY || !IMAGEKIT_URL_ENDPOINT) throw new Error('IMAGEKIT_PRIVATE_KEY/IMAGEKIT_URL_ENDPOINT não configurados');
+    const form = new FormData();
+    const safeName = `${entityType}_${normalizeKey(entityKey).replace(/\s+/g, '_') || 'retrato'}${path.extname(filePath) || '.png'}`;
+    form.append('file', fileToBase64(filePath));
+    form.append('fileName', safeName);
+    form.append('useUniqueFileName', 'false');
+    form.append('overwriteFile', 'true');
+    form.append('folder', IMAGEKIT_FOLDER);
+    form.append('tags', `chasing-immortality,${entityType}`);
+    const response = await fetch('https://upload.imagekit.io/api/v1/files/upload', {
+        method: 'POST',
+        headers: {
+            Authorization: `Basic ${Buffer.from(`${IMAGEKIT_PRIVATE_KEY}:`).toString('base64')}`
+        },
+        body: form
+    });
+    if (!response.ok) throw new Error(`ImageKit HTTP ${response.status}`);
+    const data = await response.json();
+    const url = data?.url || data?.thumbnailUrl;
+    if (!url) throw new Error('ImageKit não retornou URL');
+    return { publicUrl: url, hostProvider: 'imagekit' };
 }
 
-async function rollMobDrops(mob) {
-    const drops = [];
-    for (const [name, chance, minQty, maxQty] of mob.drops || []) {
-        if (rollDice(100) <= chance) {
-            const item = await getOrCreateItemByName(name, { tipo: 'material', raridade: 'Comum', efeito: 'Drop de criatura.' });
-            drops.push({ item, quantidade: randomBetween(minQty, maxQty) });
+async function ensureHostedPortraitUrl(record) {
+    if (!record) return null;
+    if (record.public_url) return record;
+
+    let filePath = record.image_path && fs.existsSync(record.image_path) ? record.image_path : null;
+    if (!filePath && record.source_url) {
+        const ext = '.png';
+        filePath = path.join(GENERATED_IMAGES_DIR, `${record.entity_type}_${crypto.createHash('md5').update(record.entity_key || '').digest('hex').slice(0, 12)}${ext}`);
+        try {
+            await fetchImageToFile(record.source_url, filePath);
+        } catch (err) {
+            log(`Falha ao baixar origem do retrato ${record.entity_type}/${record.entity_key}: ${err?.message || err}`, 'ERRO');
+            filePath = null;
         }
     }
-    return drops;
+
+    if (!filePath && record.remote_url && record.remote_url !== record.public_url) {
+        const ext = '.png';
+        filePath = path.join(GENERATED_IMAGES_DIR, `${record.entity_type}_${crypto.createHash('md5').update(record.entity_key || '').digest('hex').slice(0, 12)}${ext}`);
+        try {
+            await fetchImageToFile(record.remote_url, filePath);
+        } catch (err) {
+            log(`Falha ao baixar remote_url do retrato ${record.entity_type}/${record.entity_key}: ${err?.message || err}`, 'ERRO');
+            filePath = null;
+        }
+    }
+
+    let publicUrl = buildPublicUrlFromBase(filePath);
+    let hostProvider = publicUrl ? 'selfhost' : null;
+
+    if (!publicUrl && filePath) {
+        try {
+            if (IMAGE_HOST_PROVIDER === 'imgbb') {
+                ({ publicUrl, hostProvider } = await uploadToImgBB(filePath, record.entity_type, record.entity_name || record.entity_key));
+            } else if (IMAGE_HOST_PROVIDER === 'imagekit') {
+                ({ publicUrl, hostProvider } = await uploadToImageKit(filePath, record.entity_type, record.entity_name || record.entity_key));
+            }
+        } catch (err) {
+            log(`Falha ao hospedar retrato ${record.entity_type}/${record.entity_key}: ${err?.message || err}`, 'ERRO');
+        }
+    }
+
+    if (publicUrl || filePath) {
+        await runQuery(`UPDATE entity_portraits SET image_path = COALESCE(?, image_path), public_url = COALESCE(?, public_url), host_provider = COALESCE(?, host_provider), mime_type = COALESCE(?, mime_type), content_hash = COALESCE(?, content_hash), updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [filePath, publicUrl, hostProvider, filePath ? guessMimeType(filePath) : null, filePath ? computeFileHash(filePath) : null, record.id]);
+        return getQuery(`SELECT * FROM entity_portraits WHERE id = ?`, [record.id]);
+    }
+    return record;
 }
 
-async function resolveEnemyAttack(message, player, battle, sheet) {
-    let baseDamage = Number(battle.ataque || battle.inimigo?.dano || 10);
-    let damage = Math.max(1, baseDamage - Math.floor(sheet.totals.defesa / 4));
-    if (battle.defendendo) {
-        damage = Math.max(1, Math.floor(damage / 2));
-        battle.defendendo = false;
+async function ensureEntityPortrait(entityType, entityKey, prompt) {
+    const key = normalizeEntityKey(entityType, entityKey);
+    let existing = await getQuery(`SELECT * FROM entity_portraits WHERE entity_type = ? AND entity_key = ?`, [entityType, key]);
+    if (existing) {
+        if (existing.image_path && !fs.existsSync(existing.image_path)) existing.image_path = null;
+        if (!existing.public_url && (IMAGE_HOST_PROVIDER !== 'disabled' || IMAGE_PUBLIC_BASE_URL)) {
+            existing = await ensureHostedPortraitUrl(existing);
+        }
+        if (existing && (existing.image_path || existing.public_url || existing.remote_url || existing.source_url)) return existing;
     }
-    const newHp = Math.max(0, Number(player.hp_atual || 0) - damage);
-    await runQuery(`UPDATE players SET hp_atual = ? WHERE id = ?`, [newHp, player.id]);
-    await sendReply(message, `💥 ${battle.nome || battle.inimigo?.nome || 'O inimigo'} revida e causa *${damage}* de dano. Seu HP ficou em ${newHp}/${sheet.totals.hpMax}.`);
-    if (newHp <= 0) {
-        await runQuery(`UPDATE players SET hp_atual = hp_maximo, qi_atual = qi_maximo, alma_atual = alma_maxima, ouro = MAX(0, ouro - 15) WHERE id = ?`, [player.id]);
-        batalhasAtivas.delete(player.id);
-        await sendReply(message, '💀 Você caiu em combate e foi levado de volta para um lugar seguro. Perdeu 15 ouro.');
-        return true;
+
+    if (!IMAGE_API_URL || IMAGE_PROVIDER === 'disabled') {
+        await runQuery(`INSERT INTO entity_portraits (entity_type, entity_key, entity_name, prompt, provider, host_provider, status, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP) ON CONFLICT(entity_type, entity_key) DO UPDATE SET entity_name = excluded.entity_name, prompt = excluded.prompt, provider = excluded.provider, host_provider = excluded.host_provider, status = excluded.status, updated_at = CURRENT_TIMESTAMP`, [entityType, key, entityKey, prompt, IMAGE_PROVIDER || 'disabled', IMAGE_HOST_PROVIDER || 'disabled', 'pending']);
+        return getQuery(`SELECT * FROM entity_portraits WHERE entity_type = ? AND entity_key = ?`, [entityType, key]);
+    }
+
+    try {
+        const response = await fetch(IMAGE_API_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ entityType, entityKey, prompt, style: 'wuxia/xianxia', cacheKey: key })
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        let imagePath = null;
+        const sourceUrl = data?.imageUrl || null;
+        let publicUrl = null;
+        let hostProvider = null;
+        if (data?.base64) {
+            const extension = String(data.extension || 'png').replace(/[^a-z0-9]/gi, '') || 'png';
+            imagePath = path.join(GENERATED_IMAGES_DIR, `${entityType}_${crypto.createHash('md5').update(key).digest('hex').slice(0, 12)}.${extension}`);
+            fs.writeFileSync(imagePath, Buffer.from(data.base64, 'base64'));
+        } else if (sourceUrl) {
+            imagePath = path.join(GENERATED_IMAGES_DIR, `${entityType}_${crypto.createHash('md5').update(key).digest('hex').slice(0, 12)}.png`);
+            await fetchImageToFile(sourceUrl, imagePath);
+        }
+
+        if (imagePath) {
+            publicUrl = buildPublicUrlFromBase(imagePath);
+            hostProvider = publicUrl ? 'selfhost' : null;
+            if (!publicUrl) {
+                try {
+                    if (IMAGE_HOST_PROVIDER === 'imgbb') {
+                        ({ publicUrl, hostProvider } = await uploadToImgBB(imagePath, entityType, entityKey));
+                    } else if (IMAGE_HOST_PROVIDER === 'imagekit') {
+                        ({ publicUrl, hostProvider } = await uploadToImageKit(imagePath, entityType, entityKey));
+                    }
+                } catch (hostErr) {
+                    log(`Falha ao hospedar nova imagem ${entityType}/${entityKey}: ${hostErr?.message || hostErr}`, 'ERRO');
+                }
+            }
+        }
+
+        await runQuery(`INSERT INTO entity_portraits (entity_type, entity_key, entity_name, image_path, remote_url, public_url, source_url, prompt, provider, host_provider, seed, mime_type, content_hash, status, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP) ON CONFLICT(entity_type, entity_key) DO UPDATE SET entity_name = excluded.entity_name, image_path = excluded.image_path, remote_url = excluded.remote_url, public_url = COALESCE(excluded.public_url, entity_portraits.public_url), source_url = excluded.source_url, prompt = excluded.prompt, provider = excluded.provider, host_provider = COALESCE(excluded.host_provider, entity_portraits.host_provider), seed = excluded.seed, mime_type = excluded.mime_type, content_hash = excluded.content_hash, status = excluded.status, updated_at = CURRENT_TIMESTAMP`, [entityType, key, entityKey, imagePath, publicUrl || sourceUrl, publicUrl, sourceUrl, prompt, IMAGE_PROVIDER, hostProvider, String(data?.seed || ''), imagePath ? guessMimeType(imagePath) : null, imagePath ? computeFileHash(imagePath) : null, imagePath || publicUrl || sourceUrl ? 'cached' : 'pending']);
+        return getQuery(`SELECT * FROM entity_portraits WHERE entity_type = ? AND entity_key = ?`, [entityType, key]);
+    } catch (err) {
+        log(`Falha ao gerar retrato ${entityType}/${entityKey}: ${err?.message || err}`, 'ERRO');
+        await runQuery(`INSERT INTO entity_portraits (entity_type, entity_key, entity_name, prompt, provider, host_provider, status, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP) ON CONFLICT(entity_type, entity_key) DO UPDATE SET entity_name = excluded.entity_name, prompt = excluded.prompt, provider = excluded.provider, host_provider = excluded.host_provider, status = excluded.status, updated_at = CURRENT_TIMESTAMP`, [entityType, key, entityKey, prompt, IMAGE_PROVIDER || 'disabled', IMAGE_HOST_PROVIDER || 'disabled', 'error']);
+        return getQuery(`SELECT * FROM entity_portraits WHERE entity_type = ? AND entity_key = ?`, [entityType, key]);
+    }
+}
+
+async function maybeSendEntityPortrait(message, entityType, entityKey, prompt, caption = '') {
+    let portrait = await ensureEntityPortrait(entityType, entityKey, prompt);
+    if (portrait && !portrait.public_url && (IMAGE_HOST_PROVIDER !== 'disabled' || IMAGE_PUBLIC_BASE_URL)) {
+        portrait = await ensureHostedPortraitUrl(portrait);
+    }
+    try {
+        if (portrait?.image_path && fs.existsSync(portrait.image_path)) {
+            await sendReply(message, caption || `${capFirst(entityType)}: ${entityKey}`, MessageMedia.fromFilePath(portrait.image_path));
+            return true;
+        }
+        const externalUrl = portrait?.public_url || portrait?.remote_url || portrait?.source_url;
+        if (externalUrl) {
+            const media = await MessageMedia.fromUrl(externalUrl, { unsafe: true });
+            await sendReply(message, caption || `${capFirst(entityType)}: ${entityKey}`, media);
+            return true;
+        }
+    } catch (err) {
+        log(`Falha ao enviar retrato ${entityType}/${entityKey}: ${err?.message || err}`, 'ERRO');
     }
     return false;
 }
 
-async function concludeBattleVictory(message, player, battle, sheet) {
-    if (battle.tipo === 'monstro') {
-        const ouro = randomBetween(...(battle.ouroRange || [8, 16]));
-        await runQuery(`UPDATE players SET ouro = ouro + ?, reputacao = reputacao + 1 WHERE id = ?`, [ouro, player.id]);
-        const drops = await rollMobDrops(battle.mobData || { drops: [] });
-        let lootText = `🏆 Você derrotou *${battle.nome}* e ganhou ${ouro} ouro.`;
-        for (const drop of drops) {
-            await addItemToInventory(player.id, drop.item.id, drop.quantidade);
-            lootText += `\n🎁 ${drop.item.nome} x${drop.quantidade}`;
-        }
-        await updateQuestProgressOnKill(player.id, battle.nome, 'kill_mob');
-        batalhasAtivas.delete(player.id);
-        await sendReply(message, lootText);
-        return;
+async function resolveNpcForPlayer(player, token = '') {
+    const cleaned = String(token || '').trim();
+    if (!cleaned) {
+        return getQuery(`SELECT * FROM npcs WHERE localizacao = ? OR localizacao = 'global' ORDER BY CASE WHEN localizacao = ? THEN 0 ELSE 1 END, RANDOM() LIMIT 1`, [player.localizacao, player.localizacao]);
     }
-
-    if (battle.tipo === 'boss') {
-        await runQuery(`UPDATE players SET ouro = ouro + ?, merito = merito + ?, reputacao = reputacao + 3 WHERE id = ?`, [battle.recompensaOuro || 0, battle.recompensaMerito || 0, player.id]);
-        let texto = `👑 *Boss derrotado!* ${battle.nome} tombou diante de você.\n🪙 Ouro: +${battle.recompensaOuro || 0}\n🎖️ Mérito: +${battle.recompensaMerito || 0}`;
-        if (battle.dropItemId) {
-            await addItemToInventory(player.id, battle.dropItemId, battle.dropQuantidade || 1);
-            const item = await getQuery(`SELECT nome FROM itens WHERE id = ?`, [battle.dropItemId]);
-            texto += `\n🎁 Drop: ${item?.nome || 'Item raro'} x${battle.dropQuantidade || 1}`;
-        }
-        await updateQuestProgressOnKill(player.id, battle.nome, 'kill_boss');
-        batalhasAtivas.delete(player.id);
-        await sendReply(message, texto);
-        return;
+    if (/^\d+$/.test(cleaned)) {
+        const byId = await getQuery(`SELECT * FROM npcs WHERE id = ?`, [Number(cleaned)]);
+        if (byId) return byId;
     }
-
-    if (battle.tipo === 'dominio') {
-        const instancia = await getQuery(`SELECT di.*, d.nome, d.andares, d.recompensa_base_ouro FROM dominio_instancias di JOIN dominios d ON d.id = di.dominio_id WHERE di.player_id = ? AND di.dominio_id = ?`, [player.id, battle.dominioId]);
-        if (!instancia) {
-            batalhasAtivas.delete(player.id);
-            await sendReply(message, 'Você venceu a luta do domínio, mas a instância não foi encontrada.');
-            return;
-        }
-        const proximoAndar = Number(instancia.andar_atual || 1) + 1;
-        if (proximoAndar > Number(instancia.andares || 1)) {
-            await runQuery(`UPDATE dominio_instancias SET status = 'concluido' WHERE player_id = ? AND dominio_id = ?`, [player.id, battle.dominioId]);
-            const reward = Number(instancia.recompensa_base_ouro || 0) + Number(instancia.andares || 1) * 15;
-            await runQuery(`UPDATE players SET ouro = ouro + ?, merito = merito + ?, reputacao = reputacao + 2 WHERE id = ?`, [reward, Number(instancia.andares || 1), player.id]);
-            batalhasAtivas.delete(player.id);
-            await sendReply(message, `🏯 *Domínio concluído!* Você limpou ${instancia.nome} e recebeu ${reward} ouro, além de ${instancia.andares} mérito.`);
-        } else {
-            await runQuery(`UPDATE dominio_instancias SET andar_atual = ? WHERE player_id = ? AND dominio_id = ?`, [proximoAndar, player.id, battle.dominioId]);
-            batalhasAtivas.delete(player.id);
-            await sendReply(message, `✨ Andar limpo. Você agora pode seguir para o andar ${proximoAndar}/${instancia.andares} com /dominio continuar.`);
-        }
-        return;
-    }
-
-    if (battle.tipo === 'pvp') {
-        const opponent = await getPlayerById(battle.opponentId);
-        await runQuery(`UPDATE players SET merito = merito + 2, reputacao = reputacao + 1 WHERE id = ?`, [player.id]);
-        if (opponent) {
-            await runQuery(`UPDATE players SET hp_atual = hp_maximo, qi_atual = qi_maximo, alma_atual = alma_maxima WHERE id = ?`, [opponent.id]);
-        }
-        batalhasAtivas.delete(player.id);
-        if (opponent) batalhasAtivas.delete(opponent.id);
-        await sendReply(message, `⚔️ Você venceu o duelo contra ${battle.opponentName}!`);
-        if (opponent) {
-            const target = buildDirectId(opponent.telefone);
-            if (target) await client.sendMessage(target, `⚔️ Você foi derrotado em duelo por ${player.nome}.`);
-        }
-    }
+    return getQuery(`SELECT * FROM npcs WHERE LOWER(nome) = LOWER(?) AND (localizacao = ? OR localizacao = 'global') LIMIT 1`, [cleaned, player.localizacao]);
 }
 
-async function formatInventoryLine(row) {
-    const slot = row.slot ? ` • ${row.slot}` : '';
-    const equip = Number(row.equipavel || 0) === 1 ? ' [equipável]' : '';
-    return `• ID ${row.id} - ${row.nome} x${row.quantidade}${slot}${equip}`;
+function buildNpcOptions(npc, profile, relation, player) {
+    const arq = normalizeKey(profile?.arquetipo || 'andarilho');
+    const options = [
+        { label: 'Pedir orientação sobre o caminho do cultivo', delta: { afinidade: 4, confianca: 3 }, type: 'guidance', branch: 'benevolente' },
+        { label: 'Perguntar por rumores e movimentos recentes', delta: { afinidade: 1, confianca: 1 }, type: 'rumor', branch: 'pragmatica' },
+        { label: 'Solicitar ou discutir uma missão', delta: { favor: 1, confianca: 2 }, type: 'quest', branch: 'pragmatica' },
+        { label: 'Pressionar o NPC e testar seus limites', delta: { medo: 6, afinidade: -5 }, type: 'threat', branch: 'cruel' }
+    ];
+    if (arq === 'mercadora') options[0] = { label: 'Negociar em tom cordial e buscar favores comerciais', delta: { afinidade: 3, favor: 2 }, type: 'trade', branch: 'pragmatica' };
+    if (arq === 'mestre') options[0] = { label: 'Curvar-se e pedir julgamento do seu coração marcial', delta: { afinidade: 5, confianca: 4 }, type: 'master', branch: 'benevolente' };
+    if (arq === 'rival') options[3] = { label: 'Provocar um duelo verbal e medir sua hostilidade', delta: { medo: 1, afinidade: -8 }, type: 'rival', branch: 'cruel' };
+    if (Number(relation?.medo || 0) > 35) options[3] = { label: 'Recuar e medir as consequências do medo que inspira', delta: { medo: -3, confianca: 1 }, type: 'retreat', branch: 'pragmatica' };
+    if (normalizeKey(player.alinhamento).includes('justo')) options[0].delta.afinidade += 1;
+    return options;
 }
 
-async function cmdPerfil(_args, message, telefone) {
-    const player = await ensurePlayerExists(telefone, message);
-    if (!player) return;
-    const sheet = await getPlayerSheet(player);
-    const eqMap = Object.fromEntries((sheet.equipment || []).map((row) => [row.slot, row]));
-
-    const texto = [
-        `📊 *Estado de ${player.nome}*`,
-        `🆔 ${player.unique_id}`,
-        `🧬 ${player.raca} • 🏮 ${player.clan}`,
-        `🌿 ${player.raiz_espiritual} (${player.elementos})`,
-        `💪 ${player.corpo_divino || 'Corpo Comum'}`,
-        `⚖️ ${player.alinhamento} • Karma ${player.karma} • Reputação ${player.reputacao}`,
-        '',
-        `❤️ HP ${buildBar(sheet.hpAtual, sheet.totals.hpMax)} ${sheet.hpAtual}/${sheet.totals.hpMax}`,
-        `🔷 Qi ${buildBar(sheet.qiAtual, sheet.totals.qiMax)} ${sheet.qiAtual}/${sheet.totals.qiMax}`,
-        `🕯️ Alma ${buildBar(sheet.almaAtual, sheet.totals.almaMax)} ${sheet.almaAtual}/${sheet.totals.almaMax}`,
-        `😮‍💨 Fadiga ${buildBar(sheet.fadigaAtual, 100)} ${sheet.fadigaAtual}/100`,
-        '',
-        `⚔️ Força: ${sheet.totals.forca}   🛡️ Defesa: ${sheet.totals.defesa}   ⚡ Agilidade: ${sheet.totals.agilidade}`,
-        `🧠 Inteligência: ${sheet.totals.inteligencia}   🧘 Espírito: ${sheet.totals.espirito}   💪 Vigor: ${sheet.totals.vigor}`,
-        `🏆 Físico: Reino ${player.nivel_fisico} • Etapa ${player.sub_fisico}/9`,
-        `✨ Espiritual: Reino ${player.nivel_espiritual} • Etapa ${player.sub_espiritual}/9`,
-        '',
-        `🪙 Ouro: ${player.ouro}`,
-        `🔮 Pérolas Espirituais: ${player.perolas_esp}`,
-        `💎 Cristais Espirituais: ${player.cristais_esp}`,
-        `🎖️ Mérito: ${player.merito || 0}`,
-        `🧿 Essência Imortal: ${player.essencia_imortal}`,
-        '',
-        `🧥 *Equipamentos*`,
-        `• Arma: ${eqMap.arma?.nome || 'Nenhuma'}`,
-        `• Armadura: ${eqMap.armadura?.nome || 'Nenhuma'}`,
-        `• Botas: ${eqMap.botas?.nome || 'Nenhuma'}`,
-        `• Amuleto: ${eqMap.amuleto?.nome || 'Nenhum'}`,
-        `• Talismã: ${eqMap.talisma?.nome || 'Nenhum'}`,
-        `• Artefato: ${eqMap.artefato?.nome || 'Nenhum'}`,
-        '',
-        `📍 Localização: ${player.localizacao || 'Vila Inicial'}`,
-        `💼 Profissão: ${displayProfessionName(normalizeProfessionName(player.profissao_principal) || player.profissao_principal || '')} • Nível ${player.nivel_profissao || 0}`
+async function openNpcDialogue(player, message, npc) {
+    const profile = await getNpcProfile(npc.id);
+    const relation = await getOrCreateNpcRelation(player.id, npc.id);
+    await maybeSendEntityPortrait(message, 'npc', npc.nome, buildEntityPrompt('npc', npc.nome, profile?.prompt_base || profile?.estilo || npc.dialogo_inicial || ''), `🖼️ Retrato de ${npc.nome}`);
+    const options = buildNpcOptions(npc, profile, relation, player);
+    const fallback = `👤 *${npc.nome}*${profile?.titulo ? ` — ${profile.titulo}` : ''}\n📍 ${npc.localizacao}\n“${npc.dialogo_inicial}”\n\n` +
+        `Você sente que este encontro carrega peso real no mundo marcial.\n\n` +
+        options.map((opt, idx) => `${idx + 1}. ${opt.label}`).join('\n') +
+        `\n\nUse \`/npc responder <1-4>\` ou apenas envie o número.`;
+    const prompt = [
+        'Escreva uma cena curta de RPG wuxia/xianxia em português brasileiro.',
+        'Não invente recompensas nem mude regras.',
+        `NPC: ${npc.nome}`,
+        `Título: ${profile?.titulo || 'sem título'}`,
+        `Personalidade: ${profile?.personalidade || 'misterioso'}`,
+        `Local: ${npc.localizacao}`,
+        `Jogador: ${player.nome}, alinhamento ${player.alinhamento}, karma ${player.karma}.`,
+        `Memória curta do NPC sobre o jogador: ${relation.memoria_curta || 'nenhuma'}.`,
+        'Mostre 4 opções numeradas exatamente uma por linha no final.',
+        options.map((opt, idx) => `${idx + 1}. ${opt.label}`).join('\n')
     ].join('\n');
-
-    if (player.avatar_url) {
-        try {
-            const media = await MessageMedia.fromUrl(player.avatar_url, { unsafe: true });
-            await sendReply(message, texto, media);
-            return;
-        } catch (_err) {
-            // segue sem avatar
-        }
-    }
-    await sendReply(message, texto);
+    const textOut = await callOptionalAI(prompt, fallback);
+    npcDialogueSessions.set(player.id, { npcId: npc.id, options, openedAt: Date.now() });
+    await sendReply(message, textOut);
 }
 
-async function cmdInventario(_args, message, telefone) {
+async function offerNpcQuest(player, message, npcId, branchChoice = 'pragmatica') {
+    const quest = await getQuery(`SELECT * FROM npc_quests WHERE npc_id = ? ORDER BY RANDOM() LIMIT 1`, [npcId]);
+    if (!quest) {
+        await sendReply(message, '📜 Este NPC ainda não possui uma missão concreta para oferecer.');
+        return;
+    }
+    const progress = await getQuery(`SELECT * FROM npc_quest_progress WHERE player_id = ? AND quest_id = ?`, [player.id, quest.id]);
+    if (!progress) {
+        await runQuery(`INSERT INTO npc_quest_progress (player_id, quest_id, status, progresso, branch_escolhida) VALUES (?, ?, 'oferecida', 0, ?)`, [player.id, quest.id, branchChoice]);
+    }
+    const branchText = quest[`branch_${normalizeKey(branchChoice).replace(/[^a-z]/g, '')}`] || quest.branch_pragmatica || '';
+    const targetLabel = quest.objetivo_tipo === 'kill' ? `Derrote ${quest.objetivo_quantidade}x ${quest.objetivo_alvo}` : quest.objetivo_tipo === 'explore' ? `Explore ${quest.objetivo_quantidade}x a região ${quest.objetivo_alvo}` : `Entregue ${quest.objetivo_quantidade}x ${quest.objetivo_alvo}`;
+    await sendReply(message, `📜 *Missão Oferecida* — ${quest.nome}\n${quest.descricao}\n\n🎯 Objetivo: ${targetLabel}\n💰 Recompensa: ${quest.recompensa_ouro || 0} ouro • 🎖️ ${quest.recompensa_merito || 0} mérito${branchText ? `\n🧭 Tom desta rota: ${branchText}` : ''}\n\nUse \`/npc aceitar ${quest.id}\` para assumir a missão.`);
+}
+
+async function handleNpcChoice(player, message, choice) {
+    const session = npcDialogueSessions.get(player.id);
+    if (!session) {
+        await sendReply(message, 'Nenhum diálogo de NPC está aberto no momento.');
+        return;
+    }
+    const option = session.options[choice - 1];
+    if (!option) {
+        await sendReply(message, 'Escolha inválida. Use uma opção de 1 a 4.');
+        return;
+    }
+    const npc = await getQuery(`SELECT * FROM npcs WHERE id = ?`, [session.npcId]);
+    const profile = npc ? await getNpcProfile(npc.id) : null;
+    if (!npc) {
+        npcDialogueSessions.delete(player.id);
+        await sendReply(message, 'Esse encontro já se dissipou como névoa ao amanhecer.');
+        return;
+    }
+    const relation = await updateNpcRelation(player.id, npc.id, option.delta, `${player.nome} escolheu: ${option.label}`);
+    if (option.type === 'quest') {
+        npcDialogueSessions.delete(player.id);
+        await offerNpcQuest(player, message, npc.id, option.branch);
+        return;
+    }
+    let fallback = '';
+    if (option.type === 'rumor') {
+        const rumors = await buildRumorsForPlayer(player, 2);
+        fallback = `👤 *${npc.nome}* inclina a cabeça e baixa a voz.\n\n${rumors.map((r, idx) => `${idx + 1}. ${r}`).join('\n')}`;
+    } else if (option.type === 'master') {
+        const masterBond = await getOrAssignBond(player, 'mestre');
+        const data = safeJsonParse(masterBond?.data_json, {});
+        data.provas = Number(data.provas || 0) + 1;
+        await runQuery(`UPDATE player_bonds SET data_json = ?, updated_at = CURRENT_TIMESTAMP WHERE player_id = ? AND bond_type = 'mestre'`, [JSON.stringify(data), player.id]);
+        fallback = `🕯️ *${npc.nome}* observa seu dantian por um longo instante.\n“Cultivo sem coração é apenas violência polida. Volte quando seus passos soarem mais leves.”\n\nAfinidade: ${signedNumber(relation.afinidade)} • Confiança: ${signedNumber(relation.confianca)} • Medo: ${signedNumber(relation.medo)}`;
+    } else if (option.type === 'rival') {
+        const rivalBond = await getOrAssignBond(player, 'rival');
+        const data = safeJsonParse(rivalBond?.data_json, {});
+        data.rancor = clamp(Number(data.rancor || 0) + 8, 0, 100);
+        data.ultima_vista = player.localizacao;
+        await runQuery(`UPDATE player_bonds SET data_json = ?, updated_at = CURRENT_TIMESTAMP WHERE player_id = ? AND bond_type = 'rival'`, [JSON.stringify(data), player.id]);
+        fallback = `⚔️ Os olhos de ${npc.nome} brilham como lâminas. O nome de ${player.nome} agora foi gravado entre as futuras dívidas de sangue do mundo marcial.`;
+    } else if (option.type === 'trade') {
+        fallback = `🧮 ${npc.nome} mede seu valor com um sorriso de canto.\n“Uma transação justa pesa menos que uma promessa quebrada.”\n\nSeu favor com este contato agora é ${signedNumber(relation.favor)}.`;
+    } else if (option.type === 'threat') {
+        fallback = `☠️ A atmosfera esfria quando sua intenção corta o ar. ${npc.nome} não recua, mas registra seu rosto com cuidado perigoso.`;
+    } else if (option.type === 'retreat') {
+        fallback = `🫥 Você afrouxa a pressão e deixa a conversa esfriar. Nem toda vitória precisa de um cadáver.`;
+    } else {
+        fallback = `👤 ${npc.nome} responde em tom calmo, mas atento.\n“Os rios do cultivo nunca carregam o mesmo reflexo duas vezes.”`;
+    }
+    const prompt = [
+        'Escreva uma resposta curta de NPC em português brasileiro, estilo wuxia/xianxia.',
+        'Não altere regras do jogo, só a narrativa.',
+        `NPC: ${npc.nome}`,
+        `Título: ${profile?.titulo || 'Figura do Mundo Marcial'}`,
+        `Personalidade: ${profile?.personalidade || 'misterioso'}`,
+        `Jogador: ${player.nome}, alinhamento ${player.alinhamento}, karma ${player.karma}.`,
+        `Opção escolhida: ${option.label}`,
+        `Status atual do relacionamento: afinidade ${relation.afinidade}, confiança ${relation.confianca}, medo ${relation.medo}, favor ${relation.favor}.`
+    ].join('\n');
+    npcDialogueSessions.delete(player.id);
+    await sendReply(message, await callOptionalAI(prompt, fallback));
+}
+
+async function progressNpcQuests(playerId, updates = {}) {
+    const active = await allQuery(`SELECT nqp.*, nq.* FROM npc_quest_progress nqp JOIN npc_quests nq ON nq.id = nqp.quest_id WHERE nqp.player_id = ? AND nqp.status IN ('aceita', 'em_andamento')`, [playerId]);
+    for (const row of active) {
+        let gained = 0;
+        if (row.objetivo_tipo === 'kill' && updates.killName && normalizeKey(updates.killName) === normalizeKey(row.objetivo_alvo)) gained = 1;
+        else if (row.objetivo_tipo === 'explore' && updates.region && normalizeKey(updates.region) === normalizeKey(row.objetivo_alvo)) gained = 1;
+        else if (row.objetivo_tipo === 'item' && updates.itemName && normalizeKey(updates.itemName) === normalizeKey(row.objetivo_alvo)) gained = Number(updates.itemQty || 1);
+        if (gained > 0) {
+            const nextValue = Math.min(Number(row.objetivo_quantidade || 1), Number(row.progresso || 0) + gained);
+            await runQuery(`UPDATE npc_quest_progress SET progresso = ?, status = 'em_andamento' WHERE player_id = ? AND quest_id = ?`, [nextValue, playerId, row.quest_id]);
+        }
+    }
+}
+
+async function ensureNarrativeWorldEvents() {
+    const active = await getQuery(`SELECT id FROM eventos_mundiais WHERE ativo = 1 AND datetime(data_fim) >= datetime('now') LIMIT 1`);
+    if (active) return;
+    const templates = [
+        ['Leilão do Pavilhão Escarlate', 'Relíquias e técnicas antigas mudarão de mãos sob lanternas rubras e promessas envenenadas.', 'Descontos em artefatos e rumores raros.'],
+        ['Tribulação sobre o Pico de Jade', 'Nuvens de tribulação cercam o horizonte e atraem cultivadores, oportunistas e mortos-vivos.', 'Maior chance de encontrar essência espiritual.'],
+        ['Guerra Fria entre Seitas', 'Mensageiros armados percorrem estradas enquanto velhos pactos tremem sob insultos renovados.', 'Missões de seita rendem mais mérito.'],
+        ['Despertar da Besta do Vale', 'Rugidos noturnos ecoam do vale, e caravanas têm evitado a trilha principal.', 'Melhores drops de bestas espirituais.']
+    ];
+    const chosen = templates[Math.floor(Math.random() * templates.length)];
+    const start = new Date();
+    const end = new Date(Date.now() + 1000 * 60 * 60 * 24 * 2);
+    await runQuery(`INSERT INTO eventos_mundiais (nome, descricao, ativo, data_inicio, data_fim, bonus) VALUES (?, ?, 1, ?, ?, ?)`, [chosen[0], chosen[1], start.toISOString(), end.toISOString(), chosen[2]]);
+}
+
+async function buildRumorsForPlayer(player, count = 3) {
+    const scope = `${normalizeKey(player.localizacao || 'global')}|${todayKey()}`;
+    const cached = await getQuery(`SELECT rumors_json FROM rumor_cache WHERE scope_key = ? AND rumor_date = ?`, [scope, todayKey()]);
+    if (cached) {
+        const rows = safeJsonParse(cached.rumors_json, []);
+        if (rows.length >= count) return rows.slice(0, count);
+    }
+    await ensureNarrativeWorldEvents();
+    const activeEvents = await allQuery(`SELECT nome, descricao, bonus FROM eventos_mundiais WHERE ativo = 1 AND datetime(data_inicio) <= datetime('now') AND datetime(data_fim) >= datetime('now') ORDER BY data_inicio ASC LIMIT 5`);
+    const sectRows = await allQuery(`SELECT fac_a, fac_b, relacao, descricao FROM sect_relations ORDER BY ABS(relacao) DESC LIMIT 6`);
+    const rivalBond = await getOrAssignBond(player, 'rival');
+    const rivalData = safeJsonParse(rivalBond?.data_json, {});
+    const pool = [];
+    for (const ev of activeEvents) pool.push(`Dizem que *${ev.nome}* já altera o fluxo de Qi em ${player.localizacao}. ${ev.descricao}`);
+    for (const rel of sectRows.slice(0, 2)) pool.push(`Sussurra-se que ${rel.fac_a} e ${rel.fac_b} estão em estado de ${rel.relacao >= 0 ? 'trégua cautelosa' : 'hostilidade latente'} — ${rel.descricao}`);
+    pool.push(`Há quem diga que ${rivalBond.bond_name} foi visto perto de ${rivalData.ultima_vista || player.localizacao}, refinando intenção assassina.`);
+    pool.push(`Peregrinos juram que um mestre recluso avalia discípulos em ${player.localizacao}, mas só responde a quem controla a própria respiração.`);
+    pool.push(`Mercadores comentam sobre um mapa rasgado que aponta para um tesouro enterrado sob névoa e raízes retorcidas.`);
+    pool.push(`Alguns afirmam que bestas espirituais estão ficando inquietas sempre que o céu escurece ao entardecer.`);
+    const rumors = [];
+    while (pool.length && rumors.length < count) {
+        const index = Math.floor(Math.random() * pool.length);
+        rumors.push(pool.splice(index, 1)[0]);
+    }
+    await runQuery(`INSERT INTO rumor_cache (scope_key, rumor_date, rumors_json) VALUES (?, ?, ?) ON CONFLICT(scope_key, rumor_date) DO UPDATE SET rumors_json = excluded.rumors_json`, [scope, todayKey(), JSON.stringify(rumors)]);
+    return rumors;
+}
+
+async function cmdRumores(_args, message, telefone) {
+    let player = await ensurePlayerExists(telefone, message);
+    if (!player) return;
+    player = await initializeNarrativeStats(player);
+    const rumors = await buildRumorsForPlayer(player, 3);
+    await maybeSendEntityPortrait(message, 'regiao', player.localizacao || 'Região Desconhecida', buildEntityPrompt('regiao', player.localizacao || 'Região Desconhecida', 'paisagem mística, estradas antigas, clima de rumor'), `🌄 Ecos de ${player.localizacao}`);
+    await sendReply(message, `🕯️ *Rumores de ${player.localizacao}*\n\n${rumors.map((r, i) => `${i + 1}. ${r}`).join('\n\n')}`);
+}
+
+async function cmdMestre(_args, message, telefone) {
+    let player = await ensurePlayerExists(telefone, message);
+    if (!player) return;
+    player = await initializeNarrativeStats(player);
+    const bond = await getOrAssignBond(player, 'mestre');
+    const data = safeJsonParse(bond.data_json, {});
+    const npc = await getQuery(`SELECT * FROM npcs WHERE id = ?`, [Number(bond.bond_key || 0)]);
+    const profile = npc ? await getNpcProfile(npc.id) : null;
+    if (npc) await maybeSendEntityPortrait(message, 'npc', npc.nome, buildEntityPrompt('npc', npc.nome, profile?.prompt_base || profile?.estilo || ''), `🧙 Mestre associado: ${npc.nome}`);
+    const fallback = `🧙 *Vínculo de Mestre*\nNome: ${bond.bond_name}\nTítulo: ${data.titulo || profile?.titulo || 'Recluso sem título'}\n📍 Última trilha conhecida: ${data.localizacao || npc?.localizacao || 'Montanhas Distantes'}\n🧪 Provas superadas: ${data.provas || 0}\n📜 Estado: ${data.ensinou ? 'Já reconheceu parte do seu valor.' : 'Ainda o observa à distância.'}`;
+    await sendReply(message, await callOptionalAI(`Escreva uma ficha curta e elegante de mestre wuxia/xianxia em português brasileiro.\nMestre: ${bond.bond_name}\nDados: ${JSON.stringify(data)}`, fallback));
+}
+
+async function cmdRival(_args, message, telefone) {
+    let player = await ensurePlayerExists(telefone, message);
+    if (!player) return;
+    player = await initializeNarrativeStats(player);
+    const bond = await getOrAssignBond(player, 'rival');
+    const data = safeJsonParse(bond.data_json, {});
+    const fallback = `⚔️ *Rival Marcado pelo Destino*\nNome: ${bond.bond_name}\nTemperamento: ${data.temperamento || 'indefinido'}\nReino estimado: ${data.reino || 1}\nRancor: ${data.rancor || 0}/100\nÚltima vista: ${data.ultima_vista || 'desconhecida'}\n\nDizem que ele também está acumulando histórias sobre você.`;
+    await sendReply(message, await callOptionalAI(`Escreva um quadro curto de rival wuxia/xianxia em português brasileiro, tom ameaçador e elegante.\nRival: ${bond.bond_name}\nDados: ${JSON.stringify(data)}`, fallback));
+}
+
+async function cmdPoliticaSeita(_args, message, telefone) {
     const player = await ensurePlayerExists(telefone, message);
     if (!player) return;
-    const rows = await allQuery(
-        `SELECT i.id, i.nome, i.tipo, i.slot, i.equipavel, inv.quantidade
-         FROM inventario inv JOIN itens i ON i.id = inv.item_id
-         WHERE inv.player_id = ?
-         ORDER BY i.tipo ASC, i.nome ASC`,
-        [player.id]
-    );
+    const seita = await getPlayerSeita(player.id);
+    const faccao = seita?.nome || player.clan || 'Wudang';
+    const rows = await allQuery(`SELECT * FROM sect_relations WHERE fac_a = ? ORDER BY relacao ASC, fac_b ASC LIMIT 8`, [faccao]);
     if (!rows.length) {
-        await sendReply(message, '🎒 Seu inventário está vazio.');
+        await sendReply(message, `🏯 Não há registros políticos sólidos envolvendo ${faccao} ainda.`);
         return;
     }
-    let txt = '🎒 *Inventário do Cultivador*\n';
+    let txt = `🏯 *Política de Seitas — ${faccao}*\n`;
     for (const row of rows) {
-        txt += `\n${await formatInventoryLine(row)}`;
-    }
-    txt += '\n\nUse `/equipar <id_item>` para vestir equipamentos ou `/usaritem <id_item>` para consumíveis.';
-    await sendReply(message, txt);
-}
-
-async function cmdEquipamentos(_args, message, telefone) {
-    const player = await ensurePlayerExists(telefone, message);
-    if (!player) return;
-    const eq = await getEquipmentRows(player.id);
-    if (!eq.length) {
-        await sendReply(message, '🧥 Você não tem equipamentos ativos. Use `/equipar <id_item>` para vestir um item.');
-        return;
-    }
-    let txt = '🧥 *Equipamentos Ativos*\n';
-    for (const row of eq) {
-        txt += `\n• ${row.slot}: ${row.nome}`;
+        const icon = row.relacao >= 15 ? '🤝' : row.relacao <= -15 ? '⚔️' : '⚖️';
+        txt += `\n${icon} ${row.fac_b} — ${signedNumber(row.relacao)}\n${row.descricao}`;
     }
     await sendReply(message, txt);
 }
 
-async function cmdEquipar(args, message, telefone) {
+async function cmdRetrato(args, message, telefone) {
     const player = await ensurePlayerExists(telefone, message);
     if (!player) return;
-    const itemId = parseInt(args[0], 10);
-    if (Number.isNaN(itemId)) {
-        await sendReply(message, 'Uso: `/equipar <id_item>`');
+    const type = normalizeKey(args[0] || '');
+    const key = args.slice(1).join(' ').trim() || player.localizacao || 'Região Desconhecida';
+    if (!['npc','mob','regiao','região'].includes(type)) {
+        await sendReply(message, 'Uso: `/retrato <npc|mob|regiao> <nome>`');
         return;
     }
-
-    const row = await getQuery(
-        `SELECT inv.quantidade, i.*
-         FROM inventario inv
-         JOIN itens i ON i.id = inv.item_id
-         WHERE inv.player_id = ? AND inv.item_id = ?`,
-        [player.id, itemId]
-    );
-    if (!row) {
-        await sendReply(message, 'Você não possui esse item no inventário.');
-        return;
-    }
-    const slot = inferSlotFromItem(row);
-    if (Number(row.equipavel || 0) !== 1 || !slot) {
-        await sendReply(message, 'Esse item não pode ser equipado.');
-        return;
-    }
-
-    const current = await getQuery(`SELECT * FROM equipamentos WHERE player_id = ? AND slot = ?`, [player.id, slot]);
-    if (current) {
-        await addItemToInventory(player.id, current.item_id, 1);
-        await runQuery(`DELETE FROM equipamentos WHERE player_id = ? AND slot = ?`, [player.id, slot]);
-    }
-
-    const removed = await removeItemFromInventory(player.id, itemId, 1);
-    if (!removed) {
-        await sendReply(message, 'Não foi possível equipar esse item.');
-        return;
-    }
-
-    await runQuery(
-        `INSERT INTO equipamentos (player_id, item_id, slot) VALUES (?, ?, ?)
-         ON CONFLICT(player_id, slot) DO UPDATE SET item_id = excluded.item_id`,
-        [player.id, itemId, slot]
-    );
-
-    await sendReply(message, `🧥 Você equipou *${row.nome}* no slot *${slot}*.`);
-}
-
-async function cmdDesequipar(args, message, telefone) {
-    const player = await ensurePlayerExists(telefone, message);
-    if (!player) return;
-    const slot = normalizeKey(args[0]);
-    const slotAliases = { arma: 'arma', armadura: 'armadura', botas: 'botas', bota: 'botas', amuleto: 'amuleto', talisma: 'talisma', artefato: 'artefato' };
-    const realSlot = slotAliases[slot];
-    if (!realSlot) {
-        await sendReply(message, 'Uso: `/desequipar <arma|armadura|botas|amuleto|talisma|artefato>`');
-        return;
-    }
-    const current = await getQuery(`SELECT * FROM equipamentos WHERE player_id = ? AND slot = ?`, [player.id, realSlot]);
-    if (!current) {
-        await sendReply(message, 'Não há item equipado nesse slot.');
-        return;
-    }
-    await addItemToInventory(player.id, current.item_id, 1);
-    await runQuery(`DELETE FROM equipamentos WHERE player_id = ? AND slot = ?`, [player.id, realSlot]);
-    const item = await getQuery(`SELECT nome FROM itens WHERE id = ?`, [current.item_id]);
-    await sendReply(message, `📦 Você desequipou *${item?.nome || 'o item'}* do slot *${realSlot}*.`);
-}
-
-async function cmdUsarItem(args, message, telefone) {
-    const player = await ensurePlayerExists(telefone, message);
-    if (!player) return;
-    const itemId = parseInt(args[0], 10);
-    if (Number.isNaN(itemId)) {
-        await sendReply(message, 'Uso: `/usaritem <id_item>`');
-        return;
-    }
-
-    const row = await getQuery(
-        `SELECT inv.quantidade, i.* FROM inventario inv JOIN itens i ON inv.item_id = i.id WHERE inv.player_id = ? AND inv.item_id = ?`,
-        [player.id, itemId]
-    );
-    if (!row || Number(row.quantidade || 0) < 1) {
-        await sendReply(message, 'Item não encontrado no inventário.');
-        return;
-    }
-    if (Number(row.equipavel || 0) === 1) {
-        await sendReply(message, 'Esse item é um equipamento. Use `/equipar` para vesti-lo.');
-        return;
-    }
-
-    let novoQi = Number(player.qi_atual || 0);
-    let novoHp = Number(player.hp_atual || 0);
-    let novaAlma = Number(player.alma_atual || 0);
-    const efeito = String(row.efeito || '');
-    let resposta = `✨ Você usou ${row.nome}.`;
-
-    const qMatch = efeito.match(/(\d+)\s*Qi/i);
-    if (qMatch) {
-        novoQi = Math.min(Number(player.qi_maximo || 0), novoQi + Number(qMatch[1] || 0));
-        resposta += `\n🔷 Qi restaurado para ${novoQi}/${player.qi_maximo}.`;
-    }
-    const hMatch = efeito.match(/(\d+)\s*HP/i);
-    if (hMatch) {
-        novoHp = Math.min(Number(player.hp_maximo || 0), novoHp + Number(hMatch[1] || 0));
-        resposta += `\n❤️ HP restaurado para ${novoHp}/${player.hp_maximo}.`;
-    }
-    const aMatch = efeito.match(/(\d+)\s*Alma/i);
-    if (aMatch) {
-        novoAlma = Math.min(Number(player.alma_maxima || 0), novaAlma + Number(aMatch[1] || 0));
-        resposta += `\n🕯️ Alma restaurada para ${novoAlma}/${player.alma_maxima}.`;
-    }
-
-    await runQuery(`UPDATE players SET qi_atual = ?, hp_atual = ?, alma_atual = ? WHERE id = ?`, [novoQi, novoHp, novoAlma, player.id]);
-    await removeItemFromInventory(player.id, itemId, 1);
-    await sendReply(message, resposta);
-}
-
-async function cmdMenu(_args, message) {
-    const versao = '2.0.0';
-    const agora = new Date();
-    let menu = `╭━━⪩ *CHASING IMMORTALITY* ⪨━━\n`;
-    menu += `▢ Data: ${agora.toLocaleDateString('pt-BR')} • Hora: ${agora.toLocaleTimeString('pt-BR')}\n`;
-    menu += `▢ Prefixo: / • Versão: ${versao}\n`;
-    menu += `╰━━─「🪐」─━━\n\n`;
-
-    menu += `╭━━⪩ 🎯 PRINCIPAL ⪨━━\n`;
-    menu += `▢ /registrar <nome> <M/F>\n`;
-    menu += `▢ /perfil • /status • /atributos\n`;
-    menu += `▢ /inventario • /equipamentos\n`;
-    menu += `▢ /equipar <id> • /desequipar <slot>\n`;
-    menu += `╰━━─「🎯」─━━\n\n`;
-
-    menu += `╭━━⪩ ☯️ CULTIVO ⪨━━\n`;
-    menu += `▢ /cultivar [fisico|espiritual]\n`;
-    menu += `▢ /romper [fisico|espiritual]\n`;
-    menu += `▢ /tecnicas • /compreender <id> • /aprender <id>\n`;
-    menu += `▢ /descansar\n`;
-    menu += `╰━━─「☯️」─━━\n\n`;
-
-    menu += `╭━━⪩ ⚔️ COMBATE & MUNDO ⪨━━\n`;
-    menu += `▢ /andar [regiao] • /parar\n`;
-    menu += `▢ /bosses • /boss <id|nome>\n`;
-    menu += `▢ /dominio • /dominio entrar <nome> • /dominio continuar\n`;
-    menu += `▢ /atacar • /defender • /usaritem <id> • /usartecnica <id> • /fugir\n`;
-    menu += `╰━━─「⚔️」─━━\n\n`;
-
-    menu += `╭━━⪩ 🏪 PROFISSÕES & ECONOMIA ⪨━━\n`;
-    menu += `▢ /profissao listar\n`;
-    menu += `▢ /profissao escolher <nome>\n`;
-    menu += `▢ /craftar listar • /craftar detalhes <id> • /craftar <id>\n`;
-    menu += `▢ /subirprofissao\n`;
-    menu += `▢ /loja • /mercado [listar|vender|comprar|minhas]\n`;
-    menu += `╰━━─「🏪」─━━\n\n`;
-
-    menu += `╭━━⪩ 👤 NPCS & MISSÕES ⪨━━\n`;
-    menu += `▢ /npc\n`;
-    menu += `▢ /npc aceitar <id_quest>\n`;
-    menu += `▢ /npc entregar <id_quest>\n`;
-    menu += `▢ /missoesnpc\n`;
-    menu += `▢ /missoes • /aceitar <id> • /completarmissao <id>\n`;
-    menu += `▢ /criarmissao <desc> <recompensa> • /missoesdisponiveis • /minhasmissoes\n`;
-    menu += `╰━━─「👤」─━━\n\n`;
-
-    menu += `╭━━⪩ 🤝 SOCIAL ⪨━━\n`;
-    menu += `▢ /jogadores • /encontrar\n`;
-    menu += `▢ /duelar <id> • /aceitarduelo <id>\n`;
-    menu += `▢ /trocar <id> <item> <qtd>\n`;
-    menu += `▢ /amigos • /adicionaramigo <id> • /inimigo <id>\n`;
-    menu += `▢ /conversar <id> <msg> • /lerchat\n`;
-    menu += `╰━━─「🤝」─━━\n\n`;
-
-    menu += `╭━━⪩ ℹ️ INFORMAÇÕES ⪨━━\n`;
-    menu += `▢ /guia [cultivo|batalha|profissao|social]\n`;
-    menu += `▢ /ranking [forca|reino|riqueza|karma]\n`;
-    menu += `▢ /eventos • /changelog\n`;
-    menu += `▢ /mudaraparencia <url>\n`;
-    menu += `╰━━─「ℹ️」─━━`;
-
-    await sendReply(message, menu);
-}
-
-async function cmdGuia(args, message) {
-    if (!args.length) {
-        await sendReply(message, '📖 *Guias disponíveis:*\n/guia cultivo\n/guia batalha\n/guia profissao\n/guia social');
-        return;
-    }
-    const assunto = normalizeKey(args[0]);
-    let texto = '';
-    if (assunto === 'cultivo') {
-        texto = '🌿 *Guia de Cultivo*\n\nCultive para subir as etapas 1/9 dos caminhos físico e espiritual. Ao atingir 9/9, use `/romper` para enfrentar a tribulação. A alma participa das provações espirituais, então mantenha HP, Qi e Alma em dia.';
-    } else if (assunto === 'batalha') {
-        texto = '⚔️ *Guia de Batalha*\n\nVocê pode enfrentar monstros, bosses, domínios e jogadores. Equipamentos aumentam atributos reais, defesa reduz dano e técnicas gastam Qi. Bosses concedem mérito, drops raros e aceleram progressão.';
-    } else if (assunto === 'profissao' || assunto === 'profissaoes') {
-        texto = '🛠️ *Guia de Profissões*\n\nCada profissão possui receitas próprias. Use `/craftar listar` para ver as receitas, `/craftar detalhes <id>` para conferir ingredientes e `/craftar <id>` para produzir. Crafts podem falhar e também sair com qualidade Refinada, Superior ou Perfeita.';
-    } else {
-        texto = '👥 *Guia Social*\n\nUse `/duelar`, `/trocar`, `/conversar`, `/amigos` e `/lerchat` para interagir com outros cultivadores. NPCs podem oferecer missões e bosses regionais trazem recompensas cobiçadas.';
-    }
-    await sendReply(message, texto);
-}
-
-async function cmdRomper(args, message, telefone) {
-    const player = await ensurePlayerExists(telefone, message);
-    if (!player) return;
-    const escolhas = [];
-    if (Number(player.sub_fisico || 0) >= 9) escolhas.push('fisico');
-    if (Number(player.sub_espiritual || 0) >= 9) escolhas.push('espiritual');
-    if (!escolhas.length) {
-        await sendReply(message, 'Você ainda não alcançou o pico de um caminho de cultivo. Chegue a 9/9 antes de tentar romper.');
-        return;
-    }
-    let alvo = normalizeKey(args[0]);
-    if (!alvo) {
-        if (escolhas.length === 2) {
-            await sendReply(message, 'Você está pronto em dois caminhos. Escolha: `/romper fisico` ou `/romper espiritual`.');
-            return;
-        }
-        alvo = escolhas[0];
-    }
-    if (!escolhas.includes(alvo)) {
-        await sendReply(message, 'Esse caminho ainda não está pronto para a tribulação.');
-        return;
-    }
-
-    const sheet = await getPlayerSheet(player);
-    const custoQi = alvo === 'fisico' ? 20 : 30;
-    const custoAlma = alvo === 'fisico' ? 8 : 15;
-    if (sheet.qiAtual < custoQi || sheet.almaAtual < custoAlma || sheet.hpAtual < Math.floor(sheet.totals.hpMax * 0.35)) {
-        await sendReply(message, 'Sua condição está instável demais para a tribulação. Recupere HP, Qi e Alma antes de tentar novamente.');
-        return;
-    }
-
-    const chanceBase = alvo === 'fisico'
-        ? 42 + Math.floor((sheet.totals.vigor + sheet.totals.defesa) / 4)
-        : 40 + Math.floor((sheet.totals.inteligencia + sheet.totals.espirito) / 4);
-    const chance = clamp(chanceBase + Math.floor(Number(player.fortuna || 0) / 12) + (player.corpo_divino ? 8 : 0), 25, 95);
-    const roll = rollDice(100);
-
-    await runQuery(`UPDATE players SET qi_atual = qi_atual - ?, alma_atual = alma_atual - ? WHERE id = ?`, [custoQi, custoAlma, player.id]);
-
-    if (roll <= chance) {
-        if (alvo === 'fisico') {
-            await runQuery(`UPDATE players SET nivel_fisico = nivel_fisico + 1, sub_fisico = 1, forca = forca + 2, vigor = vigor + 2, defesa = defesa + 1, hp_atual = hp_maximo, qi_atual = qi_maximo, alma_atual = alma_maxima, merito = merito + 3 WHERE id = ?`, [player.id]);
-        } else {
-            await runQuery(`UPDATE players SET nivel_espiritual = nivel_espiritual + 1, sub_espiritual = 1, inteligencia = inteligencia + 2, espirito = espirito + 2, agilidade = agilidade + 1, hp_atual = hp_maximo, qi_atual = qi_maximo, alma_atual = alma_maxima, merito = merito + 4 WHERE id = ?`, [player.id]);
-        }
-        await sendReply(message, `⚡ *TRIBULAÇÃO SUPERADA!*\nO Céu reconheceu seu avanço no caminho *${alvo}*. Seu reino se elevou, seus meridianos se abriram mais e seu corpo foi reforçado pelo relâmpago da ascensão.`);
-    } else {
-        const newHp = Math.max(1, Math.floor(sheet.hpAtual * 0.45));
-        const downSub = Math.max(8, alvo === 'fisico' ? Number(player.sub_fisico || 9) - 1 : Number(player.sub_espiritual || 9) - 1);
-        if (alvo === 'fisico') {
-            await runQuery(`UPDATE players SET hp_atual = ?, sub_fisico = ? WHERE id = ?`, [newHp, downSub, player.id]);
-        } else {
-            await runQuery(`UPDATE players SET hp_atual = ?, sub_espiritual = ? WHERE id = ?`, [newHp, downSub, player.id]);
-        }
-        await sendReply(message, `🌩️ *A tribulação o rejeitou.*\nVocê falhou no caminho *${alvo}* e sofreu um severo refluxo. Seu HP caiu para ${newHp} e sua etapa recuou para ${downSub}/9.`);
-    }
-}
-
-async function cmdProfissao(args, message, telefone) {
-    const player = await ensurePlayerExists(telefone, message);
-    if (!player) return;
-    const sub = normalizeKey(args[0] || '');
-    if (!sub || sub === 'status') {
-        const key = normalizeProfessionName(player.profissao_principal);
-        const row = await getProfessionRow(player.id);
-        await sendReply(message, `💼 Profissão atual: *${displayProfessionName(key)}*\nNível: ${row?.nivel || player.nivel_profissao || 0}\nXP: ${row?.experiencia || 0}`);
-        return;
-    }
-    if (sub === 'listar') {
-        await sendReply(message, '💼 *Profissões disponíveis*\n• Alquimista\n• Forjador\n• Médico\n• Mestre de Talismã\n• Mestre de Formações\n\nUse `/profissao escolher <nome>`.');
-        return;
-    }
-    if (sub === 'escolher') {
-        const prof = normalizeProfessionName(args.slice(1).join(' '));
-        if (!prof) {
-            await sendReply(message, 'Profissão inválida.');
-            return;
-        }
-        await runQuery(`INSERT INTO profissoes (player_id, profissao, nivel, experiencia) VALUES (?, ?, 1, 0) ON CONFLICT(player_id) DO UPDATE SET profissao = excluded.profissao, nivel = CASE WHEN profissoes.profissao = excluded.profissao THEN profissoes.nivel ELSE 1 END, experiencia = CASE WHEN profissoes.profissao = excluded.profissao THEN profissoes.experiencia ELSE 0 END`, [player.id, prof]);
-        const row = await getProfessionRow(player.id);
-        await runQuery(`UPDATE players SET profissao_principal = ?, nivel_profissao = ? WHERE id = ?`, [prof, row?.nivel || 1, player.id]);
-        await sendReply(message, `🛠️ Você agora trilha a profissão *${displayProfessionName(prof)}*. Use /craftar listar para ver as receitas.`);
-        return;
-    }
-    await sendReply(message, 'Uso: `/profissao listar` ou `/profissao escolher <nome>`.');
-}
-
-async function cmdCraftar(args, message, telefone) {
-    const player = await ensurePlayerExists(telefone, message);
-    if (!player) return;
-    const profissao = normalizeProfessionName(player.profissao_principal);
-    if (!profissao) {
-        await sendReply(message, 'Você ainda não escolheu uma profissão. Use `/profissao escolher <nome>`.');
-        return;
-    }
-    const profRow = await getProfessionRow(player.id) || { nivel: Number(player.nivel_profissao || 1), experiencia: 0 };
-    const sub = normalizeKey(args[0] || 'listar');
-
-    if (sub === 'listar') {
-        const rows = await listCraftRecipesForProfession(profissao);
-        if (!rows.length) {
-            await sendReply(message, 'Nenhuma receita disponível para sua profissão.');
-            return;
-        }
-        let txt = `🧪 *Receitas de ${displayProfessionName(profissao)}*\nNível da profissão: ${profRow.nivel}\n`;
-        for (const row of rows) {
-            const resultItem = await getQuery(`SELECT nome FROM itens WHERE id = ?`, [row.resultado_item_id]);
-            txt += `\n• ID ${row.id} - ${row.nome} → ${resultItem?.nome || 'Item'} x${row.resultado_quantidade} | Nível ${row.nivel_necessario} | ${row.chance_base}% base`;
-        }
-        txt += '\n\nUse `/craftar detalhes <id>` para ver ingredientes ou `/craftar <id>` para produzir.';
-        await sendReply(message, txt);
-        return;
-    }
-
-    if (sub === 'detalhes') {
-        const recipe = await getCraftRecipeByIdOrName(profissao, args.slice(1).join(' '));
-        if (!recipe) {
-            await sendReply(message, 'Receita não encontrada.');
-            return;
-        }
-        const ingredientes = await getRecipeIngredients(recipe.id);
-        const resultItem = await getQuery(`SELECT nome FROM itens WHERE id = ?`, [recipe.resultado_item_id]);
-        let txt = `📜 *${recipe.nome}*\nResultado: ${resultItem?.nome || 'Item'} x${recipe.resultado_quantidade}\nNível necessário: ${recipe.nivel_necessario}\nChance base: ${recipe.chance_base}%\nCusto em ouro: ${recipe.custo_ouro}\nXP: ${recipe.xp_ganho}\n${recipe.descricao || ''}\n\n*Ingredientes:*`;
-        for (const ing of ingredientes) {
-            txt += `\n• ${ing.nome} x${ing.quantidade}`;
-        }
-        await sendReply(message, txt);
-        return;
-    }
-
-    const recipe = await getCraftRecipeByIdOrName(profissao, args.join(' '));
-    if (!recipe) {
-        await sendReply(message, 'Receita não encontrada. Use `/craftar listar`.');
-        return;
-    }
-    if (Number(profRow.nivel || 1) < Number(recipe.nivel_necessario || 1)) {
-        await sendReply(message, 'Seu nível de profissão ainda é insuficiente para essa receita.');
-        return;
-    }
-    if (Number(player.ouro || 0) < Number(recipe.custo_ouro || 0)) {
-        await sendReply(message, 'Você não tem ouro suficiente para esse craft.');
-        return;
-    }
-
-    const ingredientes = await getRecipeIngredients(recipe.id);
-    for (const ing of ingredientes) {
-        const row = await getQuery(`SELECT quantidade FROM inventario WHERE player_id = ? AND item_id = ?`, [player.id, ing.item_id]);
-        if (!row || Number(row.quantidade || 0) < Number(ing.quantidade || 0)) {
-            await sendReply(message, `Faltam ingredientes: ${ing.nome} x${ing.quantidade}.`);
-            return;
-        }
-    }
-
-    for (const ing of ingredientes) {
-        await removeItemFromInventory(player.id, ing.item_id, ing.quantidade);
-    }
-    await runQuery(`UPDATE players SET ouro = ouro - ? WHERE id = ?`, [recipe.custo_ouro, player.id]);
-
-    const chance = clamp(Number(recipe.chance_base || 0) + Number(profRow.nivel || 1) * 4 + Math.floor(Number(player.fortuna || 0) / 20), 20, 98);
-    const roll = rollDice(100);
-    const xpGain = Number(recipe.xp_ganho || 20);
-
-    if (roll > chance) {
-        await runQuery(`UPDATE profissoes SET experiencia = experiencia + ? WHERE player_id = ?`, [Math.max(5, Math.floor(xpGain / 2)), player.id]);
-        await sendReply(message, `💥 O craft de *${recipe.nome}* falhou. Os materiais foram consumidos, mas você ainda ganhou experiência de ofício.`);
-        return;
-    }
-
-    const baseItem = await getQuery(`SELECT * FROM itens WHERE id = ?`, [recipe.resultado_item_id]);
-    const quality = rollCraftQuality(player, Number(profRow.nivel || 1));
-    const itemToGive = await createQualityVariant(baseItem, quality);
-    await addItemToInventory(player.id, itemToGive.id, recipe.resultado_quantidade || 1);
-    await runQuery(`UPDATE profissoes SET experiencia = experiencia + ? WHERE player_id = ?`, [xpGain, player.id]);
-    await sendReply(message, `✨ Craft concluído com *qualidade ${quality}*!\nVocê produziu ${itemToGive.nome} x${recipe.resultado_quantidade || 1}.`);
-}
-
-async function cmdSubirProfissao(_args, message, telefone) {
-    const player = await ensurePlayerExists(telefone, message);
-    if (!player) return;
-    const row = await getProfessionRow(player.id);
-    if (!row) {
-        await sendReply(message, 'Você ainda não escolheu uma profissão.');
-        return;
-    }
-    const xpNec = Number(row.nivel || 1) * 120;
-    if (Number(row.experiencia || 0) < xpNec) {
-        await sendReply(message, `Você precisa de mais ${xpNec - Number(row.experiencia || 0)} XP de ofício para subir.`);
-        return;
-    }
-    const novoNivel = Number(row.nivel || 1) + 1;
-    await runQuery(`UPDATE profissoes SET nivel = ?, experiencia = experiencia - ? WHERE player_id = ?`, [novoNivel, xpNec, player.id]);
-    await runQuery(`UPDATE players SET nivel_profissao = ?, merito = merito + 1 WHERE id = ?`, [novoNivel, player.id]);
-    await sendReply(message, `🎉 Sua profissão ascendeu para *nível ${novoNivel}*! Seus crafts agora têm mais chance de sucesso e melhor qualidade.`);
-}
-
-async function processExplorationTick(player, message) {
-    const evento = rollDice(100);
-    if (evento <= 45) {
-        const mob = chooseMobForLocation(player.localizacao);
-        batalhasAtivas.set(player.id, {
-            tipo: 'monstro',
-            nome: mob.nome,
-            hp: mob.hp,
-            hpMax: mob.hp,
-            ataque: mob.ataque,
-            defesa: mob.defesa,
-            ouroRange: mob.ouro,
-            mobData: mob,
-            chatId: getChatId(message)
-        });
-        await sendReply(message, `⚔️ *Emboscada!*\nVocê encontrou *${mob.nome}* (HP ${mob.hp}). Use /atacar, /defender, /usaritem ou /usartecnica.`);
-        return;
-    }
-    if (evento <= 65) {
-        const materials = ['Erva Calmante', 'Minério Rústico', 'Essência Espiritual'];
-        const name = materials[Math.floor(Math.random() * materials.length)];
-        const item = await getOrCreateItemByName(name, { tipo: 'material', raridade: 'Comum', efeito: 'Material encontrado em exploração.' });
-        const quantidade = randomBetween(1, 2);
-        await addItemToInventory(player.id, item.id, quantidade);
-        await sendReply(message, `🌿 Você encontrou *${name}* x${quantidade} durante a exploração.`);
-        return;
-    }
-    if (evento <= 82) {
-        const npcs = await allQuery(`SELECT nome FROM npcs WHERE localizacao = ? OR localizacao = 'global'`, [player.localizacao]);
-        if (npcs.length) {
-            await sendReply(message, `👤 Você sente a presença de alguém próximo. Use /npc em *${player.localizacao}* para interagir.`);
-            return;
-        }
-    }
-    if (evento <= 92) {
-        const bosses = await allQuery(`SELECT id, nome FROM bosses_regiao WHERE localizacao = ?`, [player.localizacao]);
-        if (bosses.length) {
-            await sendReply(message, '👑 Um poder opressor ecoa pela região. Talvez seja a hora de usar /bosses.');
-            return;
-        }
-    }
-    await sendReply(message, '🍃 O vento passa entre as árvores. Nada decisivo aconteceu nesta ronda de exploração.');
-}
-
-async function cmdAndar(args, message, telefone) {
-    const player = await ensurePlayerExists(telefone, message);
-    if (!player) return;
-    if (exploracaoAtiva.has(player.id)) {
-        await sendReply(message, 'Você já está explorando. Use `/parar` para interromper.');
-        return;
-    }
-    if (Number(player.fadiga || 0) < 10) {
-        await sendReply(message, 'Você está cansado demais para explorar. Descanse primeiro.');
-        return;
-    }
-    const regiao = args.join(' ').trim() || 'Floresta Sombria';
-    await runQuery(`UPDATE players SET localizacao = ? WHERE id = ?`, [regiao, player.id]);
-    await sendReply(message, `🧭 Você segue para *${regiao}*. Um evento foi disparado imediatamente e novos eventos continuam a cada 5 minutos.`);
-    await processExplorationTick({ ...player, localizacao: regiao }, message);
-
-    const interval = setInterval(async () => {
-        try {
-            const fresh = await getPlayerById(player.id);
-            if (!fresh || !exploracaoAtiva.has(player.id)) return;
-            if (Number(fresh.fadiga || 0) <= 0) {
-                clearInterval(interval);
-                exploracaoAtiva.delete(player.id);
-                await sendReply(message, '😴 Você colapsou de exaustão e a exploração foi encerrada.');
-                return;
-            }
-            await runQuery(`UPDATE players SET fadiga = MAX(0, fadiga - 2) WHERE id = ?`, [player.id]);
-            const next = await getPlayerById(player.id);
-            await processExplorationTick(next, message);
-        } catch (err) {
-            log(`Erro no tick de exploração: ${err?.stack || err}`, 'ERRO');
-        }
-    }, 300000);
-    exploracaoAtiva.set(player.id, { interval, regiao });
-}
-
-async function cmdAtacar(_args, message, telefone) {
-    const player = await ensurePlayerExists(telefone, message);
-    if (!player) return;
-    const battle = batalhasAtivas.get(player.id);
-    if (!battle) {
-        await sendReply(message, 'Você não está em combate.');
-        return;
-    }
-    const sheet = await getPlayerSheet(player);
-    const danoBase = randomBetween(Math.max(4, Math.floor(sheet.totals.forca * 0.7)), Math.max(8, sheet.totals.forca + 8));
-    const dano = Math.max(1, danoBase - Math.floor(Number(battle.defesa || battle.inimigo?.defesa || 0) / 3));
-
-    if (battle.tipo === 'pvp') {
-        const opponent = await getPlayerById(battle.opponentId);
-        if (!opponent) {
-            batalhasAtivas.delete(player.id);
-            await sendReply(message, 'Seu oponente não pôde ser encontrado.');
-            return;
-        }
-        const oppSheet = await getPlayerSheet(opponent);
-        const realDamage = Math.max(1, dano - Math.floor(oppSheet.totals.defesa / 5));
-        const newHp = Math.max(0, Number(opponent.hp_atual || 0) - realDamage);
-        await runQuery(`UPDATE players SET hp_atual = ? WHERE id = ?`, [newHp, opponent.id]);
-        await sendReply(message, `⚔️ Você golpeou ${battle.opponentName} e causou *${realDamage}* de dano.`);
-        const target = buildDirectId(opponent.telefone);
-        if (target) await client.sendMessage(target, `⚔️ ${player.nome} o atingiu com *${realDamage}* de dano. Seu HP está em ${newHp}/${oppSheet.totals.hpMax}.`);
-        if (newHp <= 0) {
-            await concludeBattleVictory(message, player, battle, sheet);
-        }
-        return;
-    }
-
-    battle.hp = Math.max(0, Number(battle.hp || battle.hpInimigo || 0) - dano);
-    if (battle.hpInimigo != null) battle.hpInimigo = battle.hp;
-    await sendReply(message, `⚔️ Você atinge *${battle.nome || battle.inimigo?.nome}* e causa *${dano}* de dano. HP restante: ${battle.hp}/${battle.hpMax || battle.inimigo?.hp || battle.hp}.`);
-    if (battle.hp <= 0) {
-        await concludeBattleVictory(message, player, battle, sheet);
-        return;
-    }
-    await resolveEnemyAttack(message, player, battle, sheet);
-}
-
-async function cmdDefender(_args, message, telefone) {
-    const player = await ensurePlayerExists(telefone, message);
-    if (!player) return;
-    const battle = batalhasAtivas.get(player.id);
-    if (!battle) {
-        await sendReply(message, 'Você não está em combate.');
-        return;
-    }
-    battle.defendendo = true;
-    await sendReply(message, '🛡️ Você assume uma postura defensiva. O próximo golpe recebido terá o dano reduzido.');
-}
-
-async function cmdFugir(_args, message, telefone) {
-    const player = await ensurePlayerExists(telefone, message);
-    if (!player) return;
-    const battle = batalhasAtivas.get(player.id);
-    if (!battle) {
-        await sendReply(message, 'Você não está em combate.');
-        return;
-    }
-    const sheet = await getPlayerSheet(player);
-    const chance = clamp(35 + Math.floor(sheet.totals.agilidade / 2), 20, 90);
-    if (rollDice(100) <= chance) {
-        batalhasAtivas.delete(player.id);
-        await sendReply(message, '🏃 Você conseguiu escapar do combate.');
-    } else {
-        await sendReply(message, '❌ Sua tentativa de fuga falhou.');
-        await resolveEnemyAttack(message, player, battle, sheet);
-    }
-}
-
-async function cmdUsarTecnica(args, message, telefone) {
-    const player = await ensurePlayerExists(telefone, message);
-    if (!player) return;
-    const battle = batalhasAtivas.get(player.id);
-    if (!battle) {
-        await sendReply(message, 'Você não está em combate.');
-        return;
-    }
-    const idTec = parseInt(args[0], 10);
-    if (Number.isNaN(idTec)) {
-        await sendReply(message, 'Uso: `/usartecnica <id_tecnica>`');
-        return;
-    }
-    const row = await getQuery(
-        `SELECT t.* FROM tecnicas_aprendidas ta JOIN tecnicas t ON t.id = ta.tecnica_id
-         WHERE ta.player_id = ? AND ta.tecnica_id = ? AND ta.aprendida = 1`,
-        [player.id, idTec]
-    );
-    if (!row) {
-        await sendReply(message, 'Você não domina essa técnica.');
-        return;
-    }
-    if (Number(player.qi_atual || 0) < Number(row.custo_qi || 0)) {
-        await sendReply(message, `Qi insuficiente. Necessário: ${row.custo_qi}.`);
-        return;
-    }
-
-    const sheet = await getPlayerSheet(player);
-    await runQuery(`UPDATE players SET qi_atual = qi_atual - ? WHERE id = ?`, [row.custo_qi, player.id]);
-
-    if (normalizeKey(row.tipo) === 'defensiva') {
-        battle.defendendo = true;
-        await sendReply(message, `🛡️ Você executou *${row.nome}* e fortaleceu sua defesa para o próximo impacto.`);
-        return;
-    }
-
-    const base = normalizeKey(row.tipo) === 'fisica' ? sheet.totals.forca : sheet.totals.inteligencia + sheet.totals.espirito;
-    const damage = Math.max(1, Number(row.poder_base || 0) + Math.floor(base / 2) - Math.floor(Number(battle.defesa || battle.inimigo?.defesa || 0) / 4));
-
-    if (battle.tipo === 'pvp') {
-        const opponent = await getPlayerById(battle.opponentId);
-        if (!opponent) {
-            batalhasAtivas.delete(player.id);
-            await sendReply(message, 'Seu oponente desapareceu antes da técnica acertar.');
-            return;
-        }
-        const oppSheet = await getPlayerSheet(opponent);
-        const real = Math.max(1, damage - Math.floor(oppSheet.totals.defesa / 6));
-        const newHp = Math.max(0, Number(opponent.hp_atual || 0) - real);
-        await runQuery(`UPDATE players SET hp_atual = ? WHERE id = ?`, [newHp, opponent.id]);
-        await sendReply(message, `✨ *${row.nome}* acertou ${battle.opponentName} e causou *${real}* de dano!`);
-        const target = buildDirectId(opponent.telefone);
-        if (target) await client.sendMessage(target, `✨ ${player.nome} usou *${row.nome}* e lhe causou ${real} de dano.`);
-        if (newHp <= 0) await concludeBattleVictory(message, player, battle, sheet);
-        return;
-    }
-
-    battle.hp = Math.max(0, Number(battle.hp || battle.hpInimigo || 0) - damage);
-    if (battle.hpInimigo != null) battle.hpInimigo = battle.hp;
-    await sendReply(message, `✨ Você lançou *${row.nome}* e causou *${damage}* de dano em ${battle.nome || battle.inimigo?.nome}.`);
-    if (battle.hp <= 0) {
-        await concludeBattleVictory(message, player, battle, sheet);
-        return;
-    }
-    await resolveEnemyAttack(message, player, battle, sheet);
-}
-
-async function cmdBosses(_args, message, telefone) {
-    const player = await ensurePlayerExists(telefone, message);
-    if (!player) return;
-    const rows = await allQuery(`SELECT * FROM bosses_regiao WHERE localizacao = ? ORDER BY nivel ASC`, [player.localizacao]);
-    if (!rows.length) {
-        await sendReply(message, `Nenhum boss regional foi detectado em *${player.localizacao}* no momento.`);
-        return;
-    }
-    let txt = `👑 *Bosses em ${player.localizacao}*\n`;
-    for (const row of rows) {
-        txt += `\n• ID ${row.id} - ${row.nome} (Nv.${row.nivel})\n  ${row.descricao}`;
-    }
-    txt += '\n\nUse `/boss <id>` para desafiar um deles.';
-    await sendReply(message, txt);
-}
-
-async function cmdBoss(args, message, telefone) {
-    const player = await ensurePlayerExists(telefone, message);
-    if (!player) return;
-    if (batalhasAtivas.has(player.id)) {
-        await sendReply(message, 'Você já está em combate.');
-        return;
-    }
-    const query = args.join(' ').trim();
-    if (!query) {
-        await cmdBosses([], message, telefone);
-        return;
-    }
-    const id = parseInt(query, 10);
-    let boss = null;
-    if (!Number.isNaN(id)) {
-        boss = await getQuery(`SELECT * FROM bosses_regiao WHERE id = ? AND localizacao = ?`, [id, player.localizacao]);
-    }
-    if (!boss) {
-        boss = await getQuery(`SELECT * FROM bosses_regiao WHERE LOWER(nome) = LOWER(?) AND localizacao = ?`, [query, player.localizacao]);
-    }
-    if (!boss) {
-        await sendReply(message, 'Boss não encontrado nesta localização.');
-        return;
-    }
-    batalhasAtivas.set(player.id, {
-        tipo: 'boss',
-        nome: boss.nome,
-        hp: boss.hp_base,
-        hpMax: boss.hp_base,
-        ataque: boss.ataque_base,
-        defesa: boss.defesa_base,
-        recompensaOuro: boss.recompensa_ouro,
-        recompensaMerito: boss.recompensa_merito,
-        dropItemId: boss.drop_item_id,
-        dropQuantidade: boss.drop_quantidade
-    });
-    await sendReply(message, `👑 *BOSS ENCONTRADO*\n${boss.nome} surgiu diante de você!\nHP: ${boss.hp_base} • Ataque: ${boss.ataque_base} • Defesa: ${boss.defesa_base}\nUse /atacar, /defender, /usaritem ou /usartecnica.`);
-}
-
-async function cmdNPCInteragir(args, message, telefone) {
-    const player = await ensurePlayerExists(telefone, message);
-    if (!player) return;
-    const sub = normalizeKey(args[0] || 'listar');
-
-    if (sub === 'listar' || sub === 'interagir') {
-        const rows = await allQuery(
-            `SELECT n.id, n.nome, n.dialogo_inicial, q.id AS quest_id, q.titulo
-             FROM npcs n
-             LEFT JOIN quests_npc q ON q.npc_id = n.id
-             WHERE n.localizacao = ? OR n.localizacao = 'global'
-             ORDER BY n.nome ASC, q.id ASC`,
-            [player.localizacao]
-        );
-        if (!rows.length) {
-            await sendReply(message, `Nenhum NPC importante foi encontrado em *${player.localizacao}*.`);
-            return;
-        }
-        let txt = `👤 *NPCs em ${player.localizacao}*\n`;
-        let lastNpc = '';
-        for (const row of rows) {
-            if (row.nome !== lastNpc) {
-                txt += `\n*${row.nome}* — ${row.dialogo_inicial || 'Sem diálogo.'}`;
-                lastNpc = row.nome;
-            }
-            if (row.quest_id) {
-                txt += `\n   ↳ Quest ${row.quest_id}: ${row.titulo}`;
-            }
-        }
-        txt += '\n\nUse /npc aceitar <id_quest> ou /npc entregar <id_quest>. Veja também /missoesnpc.';
-        await sendReply(message, txt);
-        return;
-    }
-
-    if (sub === 'aceitar') {
-        const questId = parseInt(args[1], 10);
-        if (Number.isNaN(questId)) {
-            await sendReply(message, 'Uso: `/npc aceitar <id_quest>`');
-            return;
-        }
-        const quest = await getQuery(
-            `SELECT q.*, n.localizacao, n.nome AS npc_nome
-             FROM quests_npc q JOIN npcs n ON n.id = q.npc_id
-             WHERE q.id = ?`,
-            [questId]
-        );
-        if (!quest || quest.localizacao !== player.localizacao) {
-            await sendReply(message, 'Essa quest não está disponível neste local.');
-            return;
-        }
-        const active = await getQuery(`SELECT * FROM player_quests WHERE player_id = ? AND quest_id = ?`, [player.id, questId]);
-        if (active) {
-            await sendReply(message, 'Você já possui essa quest ativa ou concluída.');
-            return;
-        }
-        await runQuery(`INSERT INTO player_quests (player_id, quest_id, progresso, status) VALUES (?, ?, 0, 'em_andamento')`, [player.id, questId]);
-        await sendReply(message, `📜 Quest aceita: *${quest.titulo}*\n${quest.descricao}`);
-        return;
-    }
-
-    if (sub === 'entregar') {
-        const questId = parseInt(args[1], 10);
-        if (Number.isNaN(questId)) {
-            await sendReply(message, 'Uso: `/npc entregar <id_quest>`');
-            return;
-        }
-        const pq = await getQuery(
-            `SELECT pq.*, q.*, n.localizacao, n.nome AS npc_nome
-             FROM player_quests pq
-             JOIN quests_npc q ON q.id = pq.quest_id
-             JOIN npcs n ON n.id = q.npc_id
-             WHERE pq.player_id = ? AND pq.quest_id = ?`,
-            [player.id, questId]
-        );
-        if (!pq) {
-            await sendReply(message, 'Você não possui essa quest.');
-            return;
-        }
-        if (pq.localizacao !== player.localizacao) {
-            await sendReply(message, `Volte para *${pq.localizacao}* para entregar essa missão.`);
-            return;
-        }
-
-        if (pq.objetivo_tipo === 'collect_item') {
-            const inv = await getQuery(`SELECT quantidade FROM inventario WHERE player_id = ? AND item_id = ?`, [player.id, pq.item_id]);
-            if (!inv || Number(inv.quantidade || 0) < Number(pq.quantidade || 1)) {
-                await sendReply(message, 'Você ainda não reuniu todos os itens necessários.');
-                return;
-            }
-            await removeItemFromInventory(player.id, pq.item_id, pq.quantidade);
-        } else if (Number(pq.progresso || 0) < Number(pq.quantidade || 1)) {
-            await sendReply(message, `Progresso insuficiente: ${pq.progresso || 0}/${pq.quantidade}.`);
-            return;
-        }
-
-        await runQuery(`UPDATE player_quests SET status = 'concluida' WHERE player_id = ? AND quest_id = ?`, [player.id, questId]);
-        await runQuery(`UPDATE players SET ouro = ouro + ?, merito = merito + ? WHERE id = ?`, [pq.recompensa_ouro || 0, pq.recompensa_merito || 0, player.id]);
-        if (pq.recompensa_item_id) await addItemToInventory(player.id, pq.recompensa_item_id, 1);
-        const rewardItem = pq.recompensa_item_id ? await getQuery(`SELECT nome FROM itens WHERE id = ?`, [pq.recompensa_item_id]) : null;
-        let txt = `🎉 Quest concluída: *${pq.titulo}*\n🪙 Ouro: +${pq.recompensa_ouro || 0}\n🎖️ Mérito: +${pq.recompensa_merito || 0}`;
-        if (rewardItem) txt += `\n🎁 Recompensa adicional: ${rewardItem.nome}`;
-        await sendReply(message, txt);
-        return;
-    }
-
-    await sendReply(message, 'Use `/npc`, `/npc aceitar <id_quest>` ou `/npc entregar <id_quest>`.');
+    const entityType = type === 'região' ? 'regiao' : type;
+    const sent = await maybeSendEntityPortrait(message, entityType, key, buildEntityPrompt(entityType, key, 'arte wuxia/xianxia, fantasia oriental'), `🖼️ ${capFirst(entityType)}: ${key}`);
+    if (!sent) await sendReply(message, `🖼️ O retrato de *${key}* foi registrado em cache, mas nenhum provedor de imagem está configurado no momento.\nConfigure IMAGE_PROVIDER + IMAGE_API_URL para gerar a imagem e IMAGE_HOST_PROVIDER (imgbb/imagekit) para publicar uma URL persistente.`);
 }
 
 async function cmdMissoesNPC(_args, message, telefone) {
     const player = await ensurePlayerExists(telefone, message);
     if (!player) return;
-    const rows = await allQuery(
-        `SELECT pq.status, pq.progresso, q.id, q.titulo, q.quantidade, q.objetivo_tipo, q.alvo_nome, n.nome AS npc_nome, n.localizacao
-         FROM player_quests pq
-         JOIN quests_npc q ON q.id = pq.quest_id
-         JOIN npcs n ON n.id = q.npc_id
-         WHERE pq.player_id = ?
-         ORDER BY pq.started_at DESC`,
-        [player.id]
-    );
+    const rows = await allQuery(`SELECT nqp.*, nq.nome, nq.descricao, nq.objetivo_tipo, nq.objetivo_alvo, nq.objetivo_quantidade, nq.recompensa_ouro, nq.recompensa_merito, n.nome AS npc_nome FROM npc_quest_progress nqp JOIN npc_quests nq ON nq.id = nqp.quest_id JOIN npcs n ON n.id = nq.npc_id WHERE nqp.player_id = ? ORDER BY nqp.status ASC, nq.nome ASC`, [player.id]);
     if (!rows.length) {
-        await sendReply(message, 'Você não possui quests de NPC ativas no momento.');
+        await sendReply(message, '📜 Você ainda não possui missões de NPC ativas ou oferecidas.');
         return;
     }
-    let txt = '📜 *Quests de NPC*\n';
+    let txt = '📜 *Missões de NPC*\n';
     for (const row of rows) {
-        const prog = row.objetivo_tipo === 'collect_item' ? 'Entrega manual' : `${row.progresso}/${row.quantidade}`;
-        txt += `\n• ID ${row.id} - ${row.titulo}\n  NPC: ${row.npc_nome} (${row.localizacao})\n  Alvo: ${row.alvo_nome}\n  Status: ${row.status}\n  Progresso: ${prog}`;
+        txt += `\n• [${String(row.status).toUpperCase()}] ${row.nome} — ${row.npc_nome}\n`;
+        txt += `  Progresso: ${row.progresso}/${row.objetivo_quantidade} • Objetivo: ${row.objetivo_tipo} ${row.objetivo_alvo}\n`;
+        txt += `  Recompensa: ${row.recompensa_ouro || 0} ouro • ${row.recompensa_merito || 0} mérito\n`;
     }
     await sendReply(message, txt);
 }
 
-async function cmdJogadores(_args, message, telefone) {
-    const player = await ensurePlayerExists(telefone, message);
-    if (!player) return;
-    const rows = await allQuery(`SELECT nome, unique_id, localizacao, nivel_fisico, nivel_espiritual FROM players WHERE id != ? AND online = 1 ORDER BY nivel_fisico DESC, nivel_espiritual DESC LIMIT 20`, [player.id]);
-    if (!rows.length) {
-        await sendReply(message, 'Nenhum outro cultivador online foi detectado agora.');
-        return;
-    }
-    let txt = '👥 *Cultivadores Online*\n';
-    for (const row of rows) {
-        txt += `\n• ${row.nome} (${row.unique_id}) — ${row.localizacao || 'Local desconhecido'} — F${row.nivel_fisico}/E${row.nivel_espiritual}`;
-    }
-    await sendReply(message, txt);
-}
+async function cmdNPCInteragir(args, message, telefone) {
+    const playerRaw = await ensurePlayerExists(telefone, message);
+    if (!playerRaw) return;
+    const player = await initializeNarrativeStats(playerRaw);
+    const sub = normalizeKey(args[0] || 'listar');
 
-async function cmdEncontrar(_args, message, telefone) {
-    const player = await ensurePlayerExists(telefone, message);
-    if (!player) return;
-    const rows = await allQuery(`SELECT nome, unique_id, nivel_fisico, nivel_espiritual FROM players WHERE id != ? AND localizacao = ?`, [player.id, player.localizacao]);
-    if (!rows.length) {
-        await sendReply(message, `Você não encontrou outros cultivadores em *${player.localizacao}* neste momento.`);
-        return;
-    }
-    let txt = `🔍 *Cultivadores em ${player.localizacao}*\n`;
-    for (const row of rows) {
-        txt += `\n• ${row.nome} (${row.unique_id}) — F${row.nivel_fisico}/E${row.nivel_espiritual}`;
-    }
-    txt += '\n\nVocê pode usar /duelar <id> ou /trocar <id> <item> <qtd>.';
-    await sendReply(message, txt);
-}
-
-async function cmdTrocar(args, message, telefone) {
-    const player = await ensurePlayerExists(telefone, message);
-    if (!player) return;
-    if (args.length < 3) {
-        await sendReply(message, 'Uso: `/trocar <id_jogador> <id_item> <quantidade>`');
-        return;
-    }
-    const alvo = await getPlayerByUniqueId(args[0]);
-    const itemId = parseInt(args[1], 10);
-    const quantidade = parseInt(args[2], 10);
-    if (!alvo || Number.isNaN(itemId) || Number.isNaN(quantidade) || quantidade <= 0) {
-        await sendReply(message, 'Parâmetros inválidos para a troca.');
-        return;
-    }
-    if (alvo.localizacao !== player.localizacao) {
-        await sendReply(message, 'O alvo precisa estar na mesma localização.');
-        return;
-    }
-    const item = await getQuery(`SELECT i.nome, inv.quantidade FROM inventario inv JOIN itens i ON i.id = inv.item_id WHERE inv.player_id = ? AND inv.item_id = ?`, [player.id, itemId]);
-    if (!item || Number(item.quantidade || 0) < quantidade) {
-        await sendReply(message, 'Você não possui esse item em quantidade suficiente.');
-        return;
-    }
-    await removeItemFromInventory(player.id, itemId, quantidade);
-    await addItemToInventory(alvo.id, itemId, quantidade);
-    await sendReply(message, `🤝 Você entregou *${item.nome}* x${quantidade} para ${alvo.nome}.`);
-    const target = buildDirectId(alvo.telefone);
-    if (target) await client.sendMessage(target, `📦 ${player.nome} lhe entregou ${item.nome} x${quantidade}.`);
-}
-
-async function cmdDuelar(args, message, telefone) {
-    const player = await ensurePlayerExists(telefone, message);
-    if (!player) return;
-    const alvo = await getPlayerByUniqueId(args[0]);
-    if (!alvo) {
-        await sendReply(message, 'Uso: `/duelar <id_jogador>`');
-        return;
-    }
-    if (alvo.localizacao !== player.localizacao) {
-        await sendReply(message, 'O alvo precisa estar na mesma localização.');
-        return;
-    }
-    if (batalhasAtivas.has(player.id) || batalhasAtivas.has(alvo.id)) {
-        await sendReply(message, 'Um dos dois já está em combate.');
-        return;
-    }
-    duelosPendentes.set(alvo.id, { challengerId: player.id, challengerName: player.nome, challengerUniqueId: player.unique_id, expiresAt: Date.now() + 5 * 60 * 1000 });
-    await sendReply(message, `⚔️ Desafio enviado para ${alvo.nome}. Ele pode aceitar com /aceitarduelo ${player.unique_id}.`);
-    const target = buildDirectId(alvo.telefone);
-    if (target) await client.sendMessage(target, `⚔️ ${player.nome} (${player.unique_id}) o desafiou para um duelo em ${player.localizacao}. Use /aceitarduelo ${player.unique_id}.`);
-}
-
-async function cmdAceitarDuelo(args, message, telefone) {
-    const player = await ensurePlayerExists(telefone, message);
-    if (!player) return;
-    const challenger = await getPlayerByUniqueId(args[0]);
-    if (!challenger) {
-        await sendReply(message, 'Uso: `/aceitarduelo <id_jogador>`');
-        return;
-    }
-    const convite = duelosPendentes.get(player.id);
-    if (!convite || convite.challengerId !== challenger.id || convite.expiresAt < Date.now()) {
-        duelosPendentes.delete(player.id);
-        await sendReply(message, 'Nenhum desafio válido encontrado.');
-        return;
-    }
-    duelosPendentes.delete(player.id);
-    batalhasAtivas.set(player.id, { tipo: 'pvp', opponentId: challenger.id, opponentName: challenger.nome });
-    batalhasAtivas.set(challenger.id, { tipo: 'pvp', opponentId: player.id, opponentName: player.nome });
-    await sendReply(message, `⚔️ Duelo iniciado contra ${challenger.nome}!`);
-    const target = buildDirectId(challenger.telefone);
-    if (target) await client.sendMessage(target, `⚔️ ${player.nome} aceitou o duelo. O combate começou!`);
-}
-
-async function cmdDominio(args, message, telefone) {
-    const player = await ensurePlayerExists(telefone, message);
-    if (!player) return;
-    if (!args.length) {
-        const dominios = await allQuery(`SELECT * FROM dominios WHERE nivel_minimo <= ? ORDER BY nivel_minimo ASC`, [player.nivel_fisico]);
-        if (!dominios.length) {
-            await sendReply(message, 'Nenhum domínio disponível para seu nível.');
+    if (!args.length || sub === 'listar') {
+        const npcs = await allQuery(`SELECT n.id, n.nome, n.localizacao, np.titulo, np.arquetipo FROM npcs n LEFT JOIN npc_profiles np ON np.npc_id = n.id WHERE n.localizacao = ? OR n.localizacao = 'global' ORDER BY CASE WHEN n.localizacao = ? THEN 0 ELSE 1 END, n.nome ASC`, [player.localizacao, player.localizacao]);
+        if (!npcs.length) {
+            await sendReply(message, `👤 Não há NPCs visíveis em ${player.localizacao} no momento.`);
             return;
         }
-        let txt = '🏯 *Domínios Disponíveis*\n';
-        for (const d of dominios) {
-            txt += `\n• ${d.nome} — Nível mínimo ${d.nivel_minimo} — ${d.andares} andares\n  ${d.descricao}`;
-        }
-        txt += '\n\nUse /dominio entrar <nome>.';
+        let txt = `👤 *NPCs em ${player.localizacao}*\n`;
+        for (const npc of npcs) txt += `\n${npc.id}. ${npc.nome}${npc.titulo ? ` — ${npc.titulo}` : ''}${npc.arquetipo ? ` [${npc.arquetipo}]` : ''}`;
+        txt += `\n\nUse \`/npc interagir <id|nome>\`, \`/npc perfil <id|nome>\` ou \`/npc retrato <id|nome>\`.`;
         await sendReply(message, txt);
         return;
     }
-    const sub = normalizeKey(args[0]);
-    const nome = args.slice(1).join(' ');
-    if (sub === 'entrar') {
-        const dominio = await getQuery(`SELECT * FROM dominios WHERE nome = ? AND nivel_minimo <= ?`, [nome, player.nivel_fisico]);
-        if (!dominio) {
-            await sendReply(message, 'Domínio não encontrado ou nível insuficiente.');
-            return;
-        }
-        const instancia = await getQuery(`SELECT * FROM dominio_instancias WHERE player_id = ? AND dominio_id = ?`, [player.id, dominio.id]);
-        if (instancia && instancia.status === 'em_andamento') {
-            await sendReply(message, `Você já está explorando ${dominio.nome} (andar ${instancia.andar_atual}/${dominio.andares}). Use /dominio continuar.`);
-            return;
-        }
-        if (instancia && instancia.status === 'concluido') {
-            await runQuery(`UPDATE dominio_instancias SET andar_atual = 1, status = 'em_andamento', data_inicio = CURRENT_TIMESTAMP WHERE player_id = ? AND dominio_id = ?`, [player.id, dominio.id]);
-        } else {
-            await runQuery(`INSERT INTO dominio_instancias (player_id, dominio_id, andar_atual, status) VALUES (?, ?, 1, 'em_andamento')`, [player.id, dominio.id]);
-        }
-        await sendReply(message, `🌟 Você entrou em *${dominio.nome}*. Use /dominio continuar para enfrentar o próximo andar.`);
+    if (sub === 'interagir') {
+        const npc = await resolveNpcForPlayer(player, args.slice(1).join(' '));
+        if (!npc) return sendReply(message, '👤 Você não encontrou esse NPC na sua região atual.');
+        await openNpcDialogue(player, message, npc);
         return;
     }
-    if (sub === 'continuar') {
-        if (batalhasAtivas.has(player.id)) {
-            await sendReply(message, 'Você já está em combate. Resolva a luta atual antes de continuar o domínio.');
-            return;
-        }
-        const instancia = await getQuery(
-            `SELECT di.*, d.nome, d.andares, d.recompensa_base_ouro, d.item_raro_id
-             FROM dominio_instancias di JOIN dominios d ON d.id = di.dominio_id
-             WHERE di.player_id = ? AND di.status = 'em_andamento'`,
-            [player.id]
-        );
-        if (!instancia) {
-            await sendReply(message, 'Você não está em um domínio ativo.');
-            return;
-        }
-        const inimigo = gerarInimigoDominio(instancia.andar_atual, instancia.andares);
-        batalhasAtivas.set(player.id, {
-            tipo: 'dominio',
-            dominioId: instancia.dominio_id,
-            nome: inimigo.nome,
-            hp: inimigo.hp,
-            hpMax: inimigo.hp,
-            ataque: inimigo.dano,
-            defesa: inimigo.defesa || 0,
-            inimigo
-        });
-        await sendReply(message, `🏯 *${instancia.nome} — Andar ${instancia.andar_atual}/${instancia.andares}*\nVocê enfrenta *${inimigo.nome}* (HP ${inimigo.hp}).`);
+    if (sub === 'perfil') {
+        const npc = await resolveNpcForPlayer(player, args.slice(1).join(' '));
+        if (!npc) return sendReply(message, 'NPC não encontrado.');
+        const profile = await getNpcProfile(npc.id);
+        const relation = await getOrCreateNpcRelation(player.id, npc.id);
+        await maybeSendEntityPortrait(message, 'npc', npc.nome, buildEntityPrompt('npc', npc.nome, profile?.prompt_base || profile?.estilo || ''), `🖼️ Retrato de ${npc.nome}`);
+        await sendReply(message, `👤 *${npc.nome}*${profile?.titulo ? ` — ${profile.titulo}` : ''}\n📍 ${npc.localizacao}\n🧠 Personalidade: ${profile?.personalidade || 'Difícil de ler'}\n🪶 Arquétipo: ${profile?.arquetipo || 'andarilho'}\n🤝 Afinidade ${signedNumber(relation.afinidade)} • Confiança ${signedNumber(relation.confianca)} • Medo ${signedNumber(relation.medo)} • Favor ${signedNumber(relation.favor)}\n📝 Memória: ${relation.memoria_curta || 'Nenhuma lembrança forte ainda.'}`);
         return;
     }
-    await sendReply(message, 'Use `/dominio`, `/dominio entrar <nome>` ou `/dominio continuar`.');
-}
-
-function gerarInimigoDominio(andarAtual, totalAndares) {
-    const isBoss = Number(andarAtual) >= Number(totalAndares);
-    const baseHP = 70 + Number(andarAtual || 1) * 35;
-    const baseAtk = 16 + Number(andarAtual || 1) * 5;
-    const baseDef = 8 + Number(andarAtual || 1) * 2;
-    if (isBoss) {
-        return { nome: 'Guardião do Andar', hp: baseHP * 2, dano: baseAtk + 8, defesa: baseDef + 4, isChefe: true };
+    if (sub === 'responder') {
+        const choice = Number(args[1] || args[0]);
+        if (!choice || choice < 1 || choice > 4) return sendReply(message, 'Use `/npc responder <1-4>`.');
+        await handleNpcChoice(player, message, choice);
+        return;
     }
-    const pool = [
-        { nome: 'Esqueleto Guerreiro', hp: baseHP, dano: baseAtk, defesa: baseDef },
-        { nome: 'Espírito Vingativo', hp: baseHP - 10, dano: baseAtk + 4, defesa: baseDef - 2 },
-        { nome: 'Golem de Pedra', hp: baseHP + 20, dano: baseAtk - 2, defesa: baseDef + 4 }
-    ];
-    return pool[Math.floor(Math.random() * pool.length)];
+    if (sub === 'aceitar') {
+        const questId = Number(args[1] || args[0]);
+        if (!questId) return sendReply(message, 'Uso: `/npc aceitar <id_quest>`');
+        const quest = await getQuery(`SELECT * FROM npc_quests WHERE id = ?`, [questId]);
+        const progress = await getQuery(`SELECT * FROM npc_quest_progress WHERE player_id = ? AND quest_id = ?`, [player.id, questId]);
+        if (!quest || !progress) return sendReply(message, 'Essa missão de NPC não foi oferecida a você.');
+        await runQuery(`UPDATE npc_quest_progress SET status = 'aceita', data_inicio = CURRENT_TIMESTAMP WHERE player_id = ? AND quest_id = ?`, [player.id, questId]);
+        await sendReply(message, `✅ Missão aceita: *${quest.nome}*.\nObjetivo: ${quest.objetivo_tipo} ${quest.objetivo_alvo} (${quest.objetivo_quantidade}).`);
+        return;
+    }
+    if (sub === 'entregar') {
+        const questId = Number(args[1] || args[0]);
+        if (!questId) return sendReply(message, 'Uso: `/npc entregar <id_quest>`');
+        const row = await getQuery(`SELECT nqp.*, nq.*, n.nome AS npc_nome FROM npc_quest_progress nqp JOIN npc_quests nq ON nq.id = nqp.quest_id JOIN npcs n ON n.id = nq.npc_id WHERE nqp.player_id = ? AND nqp.quest_id = ?`, [player.id, questId]);
+        if (!row) return sendReply(message, 'Missão não encontrada.');
+        if (Number(row.progresso || 0) < Number(row.objetivo_quantidade || 1)) return sendReply(message, `A missão ainda não foi concluída. Progresso atual: ${row.progresso}/${row.objetivo_quantidade}.`);
+        if (normalizeKey(row.objetivo_tipo) === 'item') {
+            const item = await getItemByName(row.objetivo_alvo);
+            const removed = item ? await removeItemFromInventory(player.id, item.id, row.objetivo_quantidade) : false;
+            if (!removed) return sendReply(message, `Você ainda precisa carregar ${row.objetivo_quantidade}x ${row.objetivo_alvo} para a entrega.`);
+        }
+        if (Number(row.recompensa_ouro || 0) > 0) await updatePlayer(player.id, 'ouro', Number(player.ouro || 0) + Number(row.recompensa_ouro || 0));
+        if (Number(row.recompensa_merito || 0) > 0) await updatePlayer(player.id, 'merito', Number(player.merito || 0) + Number(row.recompensa_merito || 0));
+        if (row.recompensa_item_id) await addItemToInventory(player.id, row.recompensa_item_id, 1);
+        await runQuery(`UPDATE npc_quest_progress SET status = 'concluida', data_conclusao = CURRENT_TIMESTAMP WHERE player_id = ? AND quest_id = ?`, [player.id, questId]);
+        await updateNpcRelation(player.id, row.npc_id, { afinidade: 6, confianca: 4, favor: -1 }, `Concluiu a missão ${row.nome}`);
+        await sendReply(message, `🎉 *${row.nome}* concluída!\nRecebido: ${row.recompensa_ouro || 0} ouro • ${row.recompensa_merito || 0} mérito.`);
+        return;
+    }
+    if (sub === 'retrato') {
+        const npc = await resolveNpcForPlayer(player, args.slice(1).join(' '));
+        if (!npc) return sendReply(message, 'NPC não encontrado para retrato.');
+        const profile = await getNpcProfile(npc.id);
+        const sent = await maybeSendEntityPortrait(message, 'npc', npc.nome, buildEntityPrompt('npc', npc.nome, profile?.prompt_base || profile?.estilo || ''), `🖼️ Retrato de ${npc.nome}`);
+        if (!sent) await sendReply(message, 'Retrato ainda não pôde ser gerado automaticamente. Configure IMAGE_PROVIDER + IMAGE_API_URL e, se quiser URL pública fixa, IMAGE_HOST_PROVIDER=imgbb ou imagekit.');
+        return;
+    }
+    await sendReply(message, 'Comandos de NPC: `/npc`, `/npc interagir <id|nome>`, `/npc responder <1-4>`, `/npc perfil <id|nome>`, `/npc aceitar <id>`, `/npc entregar <id>`, `/npc retrato <id|nome>`.');
 }
 
-async function cmdBossAlias(args, message, telefone) {
-    return cmdBoss(args, message, telefone);
+async function cmdSeitaExtra(args, message, telefone) {
+    const sub = normalizeKey(args[0] || '');
+    if (sub === 'politica' || sub === 'política') return cmdPoliticaSeita(args.slice(1), message, telefone);
+    return sendReply(message, 'Use `/seita politica` para ver a política entre facções.');
 }
 
-async function cmdMercadoGlobal(args, message, telefone) {
-    // mantém a base existente, mas com texto melhor quando vazio
-    const player = await ensurePlayerExists(telefone, message);
+async function cmdPerfil(_args, message, telefone) {
+    let player = await ensurePlayerExists(telefone, message);
     if (!player) return;
-    const sub = normalizeKey(args[0] || 'listar');
-    if (sub === 'listar' || sub === 'minhas' || sub === 'vender' || sub === 'comprar') {
-        return await (async function wrapped() {
-            const _cmd = args[0] || 'listar';
-            // reutiliza a implementação anterior declarada no arquivo
-            if (_cmd === 'listar' || _cmd === 'minhas' || _cmd === 'vender' || _cmd === 'comprar') {
-                // chama a versão antiga via bloco reaproveitado não é simples, então aplicamos lógica equivalente compacta
-                if (sub === 'listar') {
-                    const rows = await allQuery(`SELECT mp.id, mp.quantidade, mp.preco_unitario, mp.moeda_tipo, i.nome AS item_nome, p.nome AS vendedor_nome FROM mercado_player mp JOIN itens i ON i.id = mp.item_id JOIN players p ON p.id = mp.vendedor_id ORDER BY mp.data_postagem DESC LIMIT 25`);
-                    if (!rows.length) return await sendReply(message, '🏪 O mercado global está vazio.');
-                    let txt = '🏪 *Mercado Global*\n';
-                    for (const r of rows) txt += `\nID ${r.id} - ${r.item_nome} x${r.quantidade} | ${r.preco_unitario} ${r.moeda_tipo} cada | ${r.vendedor_nome}`;
-                    txt += '\n\nUse `/mercado vender <id_item> <qtd> <preco> [moeda]`, `/mercado comprar <id_listagem> [qtd]` ou `/mercado minhas`.';
-                    return await sendReply(message, txt);
-                }
-                if (sub === 'minhas') {
-                    const rows = await allQuery(`SELECT mp.id, mp.quantidade, mp.preco_unitario, mp.moeda_tipo, i.nome AS item_nome FROM mercado_player mp JOIN itens i ON i.id = mp.item_id WHERE mp.vendedor_id = ? ORDER BY mp.data_postagem DESC`, [player.id]);
-                    if (!rows.length) return await sendReply(message, 'Você não tem listagens ativas.');
-                    let txt = '📦 *Suas listagens*\n';
-                    for (const r of rows) txt += `\nID ${r.id} - ${r.item_nome} x${r.quantidade} | ${r.preco_unitario} ${r.moeda_tipo} cada`;
-                    return await sendReply(message, txt);
-                }
-                if (sub === 'vender') {
-                    const itemId = parseInt(args[1], 10);
-                    const quantidade = parseInt(args[2], 10);
-                    const preco = parseInt(args[3], 10);
-                    const moeda = ['ouro', 'perolas_esp', 'cristais_esp', 'essencia_imortal'].includes(args[4]) ? args[4] : 'ouro';
-                    if ([itemId, quantidade, preco].some((v) => Number.isNaN(v) || v <= 0)) return await sendReply(message, 'Parâmetros inválidos.');
-                    const item = await getQuery(`SELECT inv.quantidade, i.nome FROM inventario inv JOIN itens i ON i.id = inv.item_id WHERE inv.player_id = ? AND inv.item_id = ?`, [player.id, itemId]);
-                    if (!item || item.quantidade < quantidade) return await sendReply(message, 'Quantidade insuficiente no inventário.');
-                    await removeItemFromInventory(player.id, itemId, quantidade);
-                    await runQuery(`INSERT INTO mercado_player (vendedor_id, item_id, quantidade, preco_unitario, moeda_tipo) VALUES (?, ?, ?, ?, ?)`, [player.id, itemId, quantidade, preco, moeda]);
-                    return await sendReply(message, `🪙 Listagem criada: ${item.nome} x${quantidade} por ${preco} ${moeda} cada.`);
-                }
-                if (sub === 'comprar') {
-                    const listagemId = parseInt(args[1], 10);
-                    const qtdDesejada = parseInt(args[2], 10) || 1;
-                    if (Number.isNaN(listagemId) || qtdDesejada <= 0) return await sendReply(message, 'Parâmetros inválidos.');
-                    const listagem = await getQuery(`SELECT mp.*, i.nome AS item_nome FROM mercado_player mp JOIN itens i ON i.id = mp.item_id WHERE mp.id = ?`, [listagemId]);
-                    if (!listagem) return await sendReply(message, 'Listagem não encontrada.');
-                    if (listagem.vendedor_id === player.id) return await sendReply(message, 'Você não pode comprar sua própria listagem.');
-                    const quantidade = Math.min(qtdDesejada, listagem.quantidade);
-                    const total = quantidade * listagem.preco_unitario;
-                    if (Number(player[listagem.moeda_tipo] || 0) < total) return await sendReply(message, `Saldo insuficiente: faltam ${total} ${listagem.moeda_tipo}.`);
-                    await runQuery(`UPDATE players SET ${listagem.moeda_tipo} = ${listagem.moeda_tipo} - ? WHERE id = ?`, [total, player.id]);
-                    await runQuery(`UPDATE players SET ${listagem.moeda_tipo} = ${listagem.moeda_tipo} + ? WHERE id = ?`, [total, listagem.vendedor_id]);
-                    await addItemToInventory(player.id, listagem.item_id, quantidade);
-                    if (quantidade >= listagem.quantidade) await runQuery(`DELETE FROM mercado_player WHERE id = ?`, [listagem.id]);
-                    else await runQuery(`UPDATE mercado_player SET quantidade = quantidade - ? WHERE id = ?`, [quantidade, listagem.id]);
-                    return await sendReply(message, `✅ Compra concluída: ${listagem.item_nome} x${quantidade} por ${total} ${listagem.moeda_tipo}.`);
-                }
-            }
-        })();
+    player = await initializeNarrativeStats(player);
+
+    const perfilTexto = `╭━━⪩ 📊 *ESTADO DE ${String(player.nome || '').toUpperCase()}* ⪨━━\n` +
+        `▢ 🆔 ${player.unique_id}\n` +
+        `▢ 🧬 ${player.raca} • 🏮 ${player.clan}\n` +
+        `▢ 🌿 ${player.raiz_espiritual} (${player.elementos})\n` +
+        `▢ 💪 ${player.corpo_divino || 'Corpo Comum'}\n` +
+        `▢ ⚖️ ${player.alinhamento} • Karma ${player.karma} • Reputação ${player.reputacao}\n` +
+        `▢\n` +
+        `▢ ❤️ HP ${formatBar(player.hp_atual, player.hp_maximo)} ${player.hp_atual}/${player.hp_maximo}\n` +
+        `▢ 🔷 Qi ${formatBar(player.qi_atual, player.qi_maximo)} ${player.qi_atual}/${player.qi_maximo}\n` +
+        `▢ 🕯️ Alma ${formatBar(player.alma_atual, player.alma_maxima)} ${player.alma_atual}/${player.alma_maxima}\n` +
+        `▢ 😮‍💨 Fadiga ${formatBar(clamp(Number(player.fadiga || 0), 0, 100), 100)} ${clamp(Number(player.fadiga || 0), 0, 100)}/100\n` +
+        `▢\n` +
+        `▢ 💪 Força: ${player.forca} • 🛡️ Defesa: ${player.defesa}\n` +
+        `▢ ⚡ Agilidade: ${player.agilidade} • 🧠 Inteligência: ${player.inteligencia}\n` +
+        `▢ 🧘 Espírito: ${player.espirito} • ❤️ Vigor: ${player.vigor}\n` +
+        `▢\n` +
+        `▢ 🏆 Físico: ${player.nivel_fisico}-${player.sub_fisico}\n` +
+        `▢ 🔮 Espiritual: ${player.nivel_espiritual}-${player.sub_espiritual}\n` +
+        `▢ 📍 Localização: ${player.localizacao}\n` +
+        `▢\n` +
+        `▢ 🪙 Ouro: ${player.ouro}\n` +
+        `▢ 🔮 Pérolas Espirituais: ${player.perolas_esp}\n` +
+        `▢ 💎 Cristais Espirituais: ${player.cristais_esp}\n` +
+        `▢ 🎖️ Mérito: ${player.merito || 0}\n` +
+        `▢ 🧿 Essência Imortal: ${player.essencia_imortal}\n` +
+        `╰━━─「🌙」─━━`;
+    if (player.avatar_url) {
+        try {
+            const media = await MessageMedia.fromUrl(player.avatar_url, { unsafe: true });
+            return sendReply(message, perfilTexto, media);
+        } catch (_err) {}
     }
-    await sendReply(message, 'Use `/mercado listar`, `/mercado minhas`, `/mercado vender <id_item> <qtd> <preco> [moeda]` ou `/mercado comprar <id_listagem> [qtd]`.');
+    await sendReply(message, perfilTexto);
+}
+
+async function cmdMenu(_args, message) {
+    const agora = new Date();
+    const dataStr = agora.toLocaleDateString('pt-BR');
+    const horaStr = agora.toLocaleTimeString('pt-BR');
+    const versao = '3.0.0';
+    let menu = `╭━━⪩ BEM VINDO! ⪨━━\n`;
+    menu += `▢\n`;
+    menu += `▢ • Chasing Immortality\n`;
+    menu += `▢ • Data: ${dataStr}\n`;
+    menu += `▢ • Hora: ${horaStr}\n`;
+    menu += `▢ • Prefixos: /\n`;
+    menu += `▢ • Versão: ${versao}\n`;
+    menu += `▢\n`;
+    menu += `╰━━─「🪐」─━━\n\n`;
+    menu += `╭━━⪩ 🎯 PRINCIPAL ⪨━━\n`;
+    menu += `▢\n`;
+    menu += `▢ • /registrar <nome> <M/F> - Registra seu cultivador\n`;
+    menu += `▢ • /perfil - Mostra sua identidade e progresso\n`;
+    menu += `▢ • /status - Mostra recursos e condição atual\n`;
+    menu += `▢ • /atributos - Exibe seus atributos principais\n`;
+    menu += `▢ • /inventario - Lista seus itens atuais\n`;
+    menu += `▢\n`;
+    menu += `╰━━─「🎯」─━━\n\n`;
+    menu += `╭━━⪩ ☯️ CULTIVO ⪨━━\n`;
+    menu += `▢\n`;
+    menu += `▢ • /cultivar [fisico|espiritual] - Cultiva uma trilha\n`;
+    menu += `▢ • /romper - Tenta avançar de reino\n`;
+    menu += `▢ • /tecnicas - Lista técnicas conhecidas\n`;
+    menu += `▢ • /compreender <id> - Estuda uma técnica\n`;
+    menu += `▢ • /aprender <id> - Tenta aprender uma técnica\n`;
+    menu += `▢ • /guia cultivo - Explica o sistema de cultivo\n`;
+    menu += `▢\n`;
+    menu += `╰━━─「☯️」─━━\n\n`;
+    menu += `╭━━⪩ 🧭 MUNDO ⪨━━\n`;
+    menu += `▢\n`;
+    menu += `▢ • /andar [região] - Viaja para uma região e explora\n`;
+    menu += `▢ • /parar - Para de explorar e retorna à vila\n`;
+    menu += `▢ • /dominio <nome> - Entra em uma masmorra/domínio\n`;
+    menu += `▢ • /eventos - Mostra eventos mundiais ativos\n`;
+    menu += `▢ • /ranking [forca|reino|riqueza|karma] - Classificações\n`;
+    menu += `▢ • /rumores - Ouve rumores dinâmicos da região atual\n`;
+    menu += `▢ • /retrato <npc|mob|regiao> <nome> - Exibe ou tenta gerar retrato persistente\n`;
+    menu += `▢\n`;
+    menu += `╰━━─「🧭」─━━\n\n`;
+    menu += `╭━━⪩ ⚔️ BATALHA ⪨━━\n`;
+    menu += `▢\n`;
+    menu += `▢ • /atacar - Executa um ataque básico\n`;
+    menu += `▢ • /defender - Assume postura defensiva\n`;
+    menu += `▢ • /usaritem <id> - Usa item em combate\n`;
+    menu += `▢ • /usartecnica <id> - Usa técnica em combate\n`;
+    menu += `▢ • /fugir - Tenta escapar do confronto\n`;
+    menu += `▢ • /guia batalha - Explica o combate\n`;
+    menu += `▢\n`;
+    menu += `╰━━─「⚔️」─━━\n\n`;
+    menu += `╭━━⪩ 🔄 SOCIAL ⪨━━\n`;
+    menu += `▢\n`;
+    menu += `▢ • /jogadores - Lista cultivadores próximos\n`;
+    menu += `▢ • /encontrar - Verifica encontro com outro player\n`;
+    menu += `▢ • /conversar <id> <msg> - Envia mensagem privada\n`;
+    menu += `▢ • /trocar - Troca itens com outro jogador\n`;
+    menu += `▢ • /duelar - Inicia um duelo PvP\n`;
+    menu += `▢ • /aceitarduelo <id> - Aceita um duelo pendente\n`;
+    menu += `▢ • /amigos - Lista seus amigos\n`;
+    menu += `▢ • /adicionaramigo <id> - Adiciona um amigo\n`;
+    menu += `▢ • /inimigo <id> - Declara inimizade\n`;
+    menu += `▢ • /lerchat - Lê mensagens não lidas\n`;
+    menu += `▢ • /rival - Mostra o rival marcado pelo destino\n`;
+    menu += `▢ • /mestre - Mostra o vínculo com seu mestre\n`;
+    menu += `▢\n`;
+    menu += `╰━━─「🔄」─━━\n\n`;
+    menu += `╭━━⪩ 🏪 ECONOMIA ⪨━━\n`;
+    menu += `▢\n`;
+    menu += `▢ • /loja - Lista itens da loja do bot\n`;
+    menu += `▢ • /loja comprar <id> - Compra um item\n`;
+    menu += `▢ • /loja vender <id> - Vende item para NPC mercador\n`;
+    menu += `▢ • /mercado - Mercado global entre jogadores\n`;
+    menu += `▢ • /profissao [listar|escolher] - Mostra ou escolhe sua profissão\n`;
+    menu += `▢ • /craftar <item> - Fabricar item\n`;
+    menu += `▢ • /guia profissao - Explica profissões\n`;
+    menu += `▢\n`;
+    menu += `╰━━─「🏪」─━━\n\n`;
+    menu += `╭━━⪩ 📋 MISSÕES & NPCS ⪨━━\n`;
+    menu += `▢\n`;
+    menu += `▢ • /missoes - Mostra missões da seita disponíveis\n`;
+    menu += `▢ • /aceitar <id_missao> - Aceita uma missão da seita\n`;
+    menu += `▢ • /completarmissao <id> - Resgata recompensa\n`;
+    menu += `▢ • /criarmissao <desc> <recompensa> - Cria missão pessoal\n`;
+    menu += `▢ • /missoesdisponiveis - Lista missões criadas por outros\n`;
+    menu += `▢ • /minhasmissoes - Lista missões que você criou\n`;
+    menu += `▢ • /npc - Lista NPCs da região atual\n`;
+    menu += `▢ • /npc interagir <id|nome> - Abre diálogo vivo com memória\n`;
+    menu += `▢ • /npc responder <1-4> - Escolhe uma resposta do diálogo\n`;
+    menu += `▢ • /npc perfil <id|nome> - Mostra relações e personalidade do NPC\n`;
+    menu += `▢ • /npc aceitar <id_quest> - Aceita missão de NPC\n`;
+    menu += `▢ • /npc entregar <id_quest> - Entrega missão de NPC\n`;
+    menu += `▢ • /missoesnpc - Lista suas missões de NPC\n`;
+    menu += `▢\n`;
+    menu += `╰━━─「📋」─━━\n\n`;
+    menu += `╭━━⪩ 🏯 SEITAS & POLÍTICA ⪨━━\n`;
+    menu += `▢\n`;
+    menu += `▢ • /criarseita <nome> <desc> - Cria sua própria seita\n`;
+    menu += `▢ • /convidar <id> - Convida alguém para sua seita\n`;
+    menu += `▢ • /aceitarconvite <id_seita> - Aceita um convite de seita\n`;
+    menu += `▢ • /sairseita - Sai da seita atual\n`;
+    menu += `▢ • /doar <quantidade> - Doa ouro para o tesouro da seita\n`;
+    menu += `▢ • /tecnicaseita <id_tecnica> - Adiciona técnica à biblioteca\n`;
+    menu += `▢ • /biblioteca - Lista técnicas disponíveis na seita\n`;
+    menu += `▢ • /aprender_seita <id> - Aprende técnica da biblioteca\n`;
+    menu += `▢ • /politicaseita - Mostra relações políticas entre facções\n`;
+    menu += `▢ • /seita politica - Atalho para política de seitas\n`;
+    menu += `▢\n`;
+    menu += `╰━━─「🏯」─━━\n\n`;
+    menu += `╭━━⪩ ℹ️ INFORMAÇÕES ⪨━━\n`;
+    menu += `▢\n`;
+    menu += `▢ • /changelog - Últimas atualizações do bot\n`;
+    menu += `▢ • /mudaraparencia <URL> - Define sua imagem de perfil\n`;
+    menu += `▢ • /guia [social|batalha|cultivo|profissao|npcs|ia] - Explica sistemas\n`;
+    menu += `▢ • /ajuda <comando> - Ajuda detalhada de um comando\n`;
+    menu += `▢ • /descansar - Recupera fadiga e Qi\n`;
+    menu += `▢\n`;
+    menu += `╰━━─「ℹ️」─━━\n\n`;
+    menu += `╭━━⪩ FIM ⪨━━\n`;
+    menu += `▢\n`;
+    menu += `▢ • Use os comandos com sabedoria!\n`;
+    menu += `▢ • Dica: /perfil para ver seu estado completo.\n`;
+    menu += `▢\n`;
+    menu += `╰━━─「🎮」─━━`;
+    await sendReply(message, menu);
+}
+
+async function cmdGuia(args, message) {
+    if (!args.length) {
+        await sendReply(message, '📖 *Guias disponíveis:*\n/guia cultivo\n/guia batalha\n/guia profissao\n/guia social\n/guia npcs\n/guia ia');
+        return;
+    }
+    const assunto = normalizeKey(args[0]);
+    let texto = '';
+    if (assunto === 'cultivo') texto = `🌿 *Guia de Cultivo*\n\nO cultivo é dividido em dois caminhos: *Físico* e *Espiritual*. Ao atingir o ápice, a tribulação o aguarda.`;
+    else if (assunto === 'batalha') texto = `⚔️ *Guia de Combate*\n\nO combate é por turnos. /atacar, /defender, /usaritem, /usartecnica e /fugir continuam sendo a base do confronto.`;
+    else if (assunto === 'profissao') texto = `🛠️ *Guia de Profissões*\n\nAlquimista, Forjador, Médico, Mestre de Talismã e Mestre de Formações podem craftar, subir de nível e alimentar sua economia.`;
+    else if (assunto === 'social') texto = `👥 *Guia Social*\n\nUse /amigos, /adicionaramigo, /inimigo, /conversar e /lerchat para tecer alianças e inimizades.`;
+    else if (assunto === 'npcs') texto = `👤 *Guia de NPCs Vivos*\n\n• /npc — lista NPCs na sua região\n• /npc interagir <id|nome> — abre diálogo vivo com memória\n• /npc responder <1-4> — escolhe sua postura na conversa\n• /npc perfil <id|nome> — vê afinidade, confiança, medo e favor\n• /npc aceitar <id_quest> e /npc entregar <id_quest> — controla missões ramificadas\n\nOs NPCs lembram da sua postura e alteram o tom ao longo do tempo.`;
+    else if (assunto === 'ia') texto = `🤖 *Guia de IA Opcional*\n\nTexto vivo: configure AI_PROVIDER=ollama, OLLAMA_URL e OLLAMA_MODEL.\nImagens persistentes: configure IMAGE_PROVIDER e IMAGE_API_URL para um serviço local/bridge de geração.\n\nSem configuração, o bot continua funcionando com texto temático em fallback e registra os retratos em cache para uso futuro.`;
+    else texto = 'Assunto não encontrado. Use /guia sem argumentos para ver a lista.';
+    await sendReply(message, texto);
+}
+
+async function cmdEventos(_args, message) {
+    await ensureNarrativeWorldEvents();
+    const rows = await allQuery(`SELECT * FROM eventos_mundiais WHERE ativo = 1 AND datetime(data_inicio) <= datetime('now') AND datetime(data_fim) >= datetime('now') ORDER BY data_inicio ASC LIMIT 10`);
+    if (!rows.length) return sendReply(message, 'No momento não há eventos mundiais ativos.');
+    let txt = '🌍 *Eventos Mundiais Ativos*\n';
+    for (const e of rows) txt += `\n*${e.nome}*\n${e.descricao}\n🎁 Bônus: ${e.bonus}\n⏳ Até ${e.data_fim}\n`;
+    await sendReply(message, txt);
+}
+
+function pickMobForRegion(regionName) {
+    const key = normalizeKey(regionName || '');
+    if (key.includes('templo')) return { nome: 'Acólito Profanado', hp: 72 + rollDice(18), danoBase: 10, prompt: 'acólito corrompido, templo antigo, energia sombria, arte xianxia' };
+    if (key.includes('pico')) return { nome: 'Falcão do Trovão', hp: 78 + rollDice(22), danoBase: 12, prompt: 'ave espiritual de raio, céu tempestuoso, montanha alta, arte xianxia' };
+    return { nome: 'Lobo Selvagem', hp: 58 + rollDice(18), danoBase: 8, prompt: 'lobo espiritual selvagem, floresta sombria, olhos luminosos, arte xianxia' };
+}
+
+async function cmdAndar(args, message, telefone) {
+    const playerRaw = await ensurePlayerExists(telefone, message);
+    if (!playerRaw) return;
+    const player = await initializeNarrativeStats(playerRaw);
+    if (exploracaoAtiva.has(player.id)) return sendReply(message, 'Você já está explorando. Use `/parar` para sair.');
+    if (player.fadiga < 10) return sendReply(message, 'Você está exausto. Descanse primeiro (`/descansar`).');
+    const regiao = args.join(' ').trim() || 'Floresta Sombria';
+    await updatePlayer(player.id, 'localizacao', regiao);
+    await progressNpcQuests(player.id, { region: regiao });
+    await maybeSendEntityPortrait(message, 'regiao', regiao, buildEntityPrompt('regiao', regiao, 'montanhas, névoa, fantasia oriental'), `🌄 Região: ${regiao}`);
+    const fallback = `🌲 *Exploração iniciada em ${regiao}*\nA estrada antiga range sob seus passos enquanto o vento conduz o cheiro de resina, sangue seco e sorte incompleta.\nA cada 5 minutos, o mundo responderá ao seu avanço. Use /parar para sair.`;
+    await sendReply(message, await callOptionalAI(`Escreva uma abertura curta de exploração em português brasileiro, estilo wuxia/xianxia.\nRegião: ${regiao}\nJogador: ${player.nome}, karma ${player.karma}, alinhamento ${player.alinhamento}.`, fallback));
+    const interval = setInterval(async () => {
+        try {
+            const pRaw = await getPlayer(telefone);
+            if (!pRaw || !exploracaoAtiva.has(pRaw.id)) return;
+            const p = await initializeNarrativeStats(pRaw);
+            if (p.fadiga <= 0) {
+                clearInterval(interval);
+                exploracaoAtiva.delete(p.id);
+                await client.sendMessage(getChatId(message), '😴 Você desmaiou de cansaço. Volte quando descansar.');
+                return;
+            }
+            await updatePlayer(p.id, 'fadiga', Math.max(0, p.fadiga - 2));
+            const evento = rollDice(100);
+            if (evento <= 28) await iniciarCombateMonstro(p, message);
+            else if (evento <= 46) await encontrarNPC(p, message);
+            else if (evento <= 58) {
+                const herb = await getItemByName('Erva do Orvalho Noturno');
+                if (herb) await addItemToInventory(p.id, herb.id, 1);
+                await progressNpcQuests(p.id, { itemName: 'Erva do Orvalho Noturno', itemQty: 1 });
+                await client.sendMessage(getChatId(message), '🍃 Você encontra Erva do Orvalho Noturno entre raízes umedecidas.');
+            } else if (evento <= 66) await encontrarJogador(p, message);
+            else if (evento <= 76) await cmdRumores([], message, telefone);
+            else await client.sendMessage(getChatId(message), '🍂 O caminho permanece silencioso, mas não vazio. Você sente olhos invisíveis acompanhando sua passagem.');
+        } catch (err) {
+            log(`Erro na exploração viva: ${err?.stack || err}`, 'ERRO');
+        }
+    }, 300000);
+    exploracaoAtiva.set(player.id, { interval, regiao });
+}
+
+async function iniciarCombateMonstro(player, msg) {
+    const mob = pickMobForRegion(player.localizacao);
+    batalhasAtivas.set(player.id, { tipo: 'monstro', nome: mob.nome, hp: mob.hp, hpMax: mob.hp, danoBase: mob.danoBase, turno: 'jogador' });
+    await maybeSendEntityPortrait(msg, 'mob', mob.nome, buildEntityPrompt('mob', mob.nome, mob.prompt), `🐺 Encontro: ${mob.nome}`);
+    const fallback = `⚔️ *COMBATE* ⚔️\nVocê encontra ${mob.nome} em ${player.localizacao}. O ar vibra com intenção assassina.\nHP do inimigo: ${mob.hp}\nUse /atacar, /defender, /usaritem, /fugir ou /usartecnica.`;
+    await sendReply(msg, await callOptionalAI(`Escreva uma abertura breve de combate wuxia/xianxia em português brasileiro.\nMonstro: ${mob.nome}\nRegião: ${player.localizacao}\nJogador: ${player.nome}`, fallback));
+}
+
+async function encontrarNPC(player, msg) {
+    const npc = await getQuery(`SELECT * FROM npcs WHERE localizacao = ? OR localizacao = 'global' ORDER BY CASE WHEN localizacao = ? THEN 0 ELSE 1 END, RANDOM() LIMIT 1`, [player.localizacao, player.localizacao]);
+    if (!npc) return client.sendMessage(getChatId(msg), '👤 Um andarilho misterioso cruza seu caminho, mas desaparece na névoa.');
+    await openNpcDialogue(player, msg, npc);
+}
+
+async function cmdAtacar(_args, message, telefone) {
+    let player = await ensurePlayerExists(telefone, message);
+    if (!player) return;
+    player = await initializeNarrativeStats(player);
+    const batalha = batalhasAtivas.get(player.id);
+    if (!batalha) return sendReply(message, 'Você não está em combate.');
+    const dano = Number(player.forca || 0) + rollDice(15);
+
+    if (batalha.tipo === 'monstro') {
+        batalha.hp -= dano;
+        await sendReply(message, `⚔️ Você ataca ${batalha.nome} e causa ${dano} de dano. HP restante: ${Math.max(0, batalha.hp)}/${batalha.hpMax}`);
+        if (batalha.hp <= 0) {
+            const recompensaOuro = 12 + rollDice(20);
+            await updatePlayer(player.id, 'ouro', Number(player.ouro || 0) + recompensaOuro);
+            await progressNpcQuests(player.id, { killName: batalha.nome });
+            const bone = await getItemByName('Fragmento de Osso Espiritual');
+            if (bone && rollDice(100) <= 40) await addItemToInventory(player.id, bone.id, 1);
+            await sendReply(message, `🏆 Você derrotou ${batalha.nome}! Ganhou ${recompensaOuro} ouro.`);
+            batalhasAtivas.delete(player.id);
+            return;
+        }
+        let danoMonstro = Number(batalha.danoBase || 8) + rollDice(8);
+        if (batalha.defendendo) { danoMonstro = Math.floor(danoMonstro / 2); batalha.defendendo = false; }
+        const novoHP = Math.max(0, Number(player.hp_atual || 0) - danoMonstro);
+        await updatePlayer(player.id, 'hp_atual', novoHP);
+        await sendReply(message, `🐺 ${batalha.nome} revida e causa ${danoMonstro} de dano. Seu HP: ${novoHP}/${player.hp_maximo}`);
+        if (novoHP <= 0) {
+            await sendReply(message, '💀 Você tombou no chão poeirento da batalha, mas desperta mais tarde na vila.');
+            await updatePlayer(player.id, 'ouro', Math.max(0, Number(player.ouro || 0) - 10));
+            await updatePlayer(player.id, 'hp_atual', Number(player.hp_maximo || 1));
+            batalhasAtivas.delete(player.id);
+        }
+        return;
+    }
+    if (batalha.tipo === 'dominio') {
+        batalha.hpInimigo -= dano;
+        await sendReply(message, `⚔️ Você ataca o ${batalha.inimigo.nome} e causa ${dano} de dano. HP restante: ${Math.max(0, batalha.hpInimigo)}/${batalha.inimigo.hp}`);
+        if (batalha.hpInimigo <= 0) {
+            await sendReply(message, `🏆 Você derrotou ${batalha.inimigo.nome}!`);
+            db.get(`SELECT di.*, d.andares, d.recompensa_base_ouro FROM dominio_instancias di JOIN dominios d ON di.dominio_id = d.id WHERE di.player_id = ? AND di.dominio_id = ?`, [player.id, batalha.dominioId], async (err, instancia) => {
+                if (err || !instancia) return;
+                const novoAndar = batalha.andar + 1;
+                if (novoAndar > instancia.andares) {
+                    db.run(`UPDATE dominio_instancias SET status = 'concluido' WHERE player_id = ? AND dominio_id = ?`, [player.id, batalha.dominioId]);
+                    const recompensa = instancia.recompensa_base_ouro + (instancia.andares * 10);
+                    await updatePlayer(player.id, 'ouro', Number(player.ouro || 0) + recompensa);
+                    await sendReply(message, `🎉 *DOMÍNIO CONCLUÍDO!* Você recebeu ${recompensa} ouro.`);
+                    batalhasAtivas.delete(player.id);
+                } else {
+                    db.run(`UPDATE dominio_instancias SET andar_atual = ? WHERE player_id = ? AND dominio_id = ?`, [novoAndar, player.id, batalha.dominioId]);
+                    await sendReply(message, `✨ Você avança para o andar ${novoAndar}/${instancia.andares}. Use /dominio continuar para prosseguir.`);
+                    batalhasAtivas.delete(player.id);
+                }
+            });
+            return;
+        }
+        let danoInimigo = batalha.inimigo.dano + rollDice(5);
+        if (batalha.defendendo) { danoInimigo = Math.floor(danoInimigo / 2); batalha.defendendo = false; }
+        const novoHP = Math.max(0, Number(player.hp_atual || 0) - danoInimigo);
+        await updatePlayer(player.id, 'hp_atual', novoHP);
+        await sendReply(message, `💥 ${batalha.inimigo.nome} ataca e causa ${danoInimigo} de dano. Seu HP: ${novoHP}/${player.hp_maximo}`);
+        if (novoHP <= 0) {
+            await sendReply(message, '💀 Você foi derrotado no domínio! Perdeu o progresso e retorna à vila.');
+            db.run(`DELETE FROM dominio_instancias WHERE player_id = ? AND dominio_id = ?`, [player.id, batalha.dominioId]);
+            batalhasAtivas.delete(player.id);
+            await updatePlayer(player.id, 'hp_atual', Number(player.hp_maximo || 1));
+        }
+        return;
+    }
+    await sendReply(message, 'Combate PvP em desenvolvimento.');
 }
 
 async function processCommand(message) {
     try {
         if (!message || typeof message !== 'object') return;
-        if (await handlePendingResponse(message)) return;
-
         const body = typeof message.body === 'string' ? message.body.trim() : '';
-        if (!body.startsWith(COMMAND_PREFIX)) return;
+        if (!body) return;
+        const telefone = getSenderId(message);
+        if (!telefone) return sendReply(message, 'Não foi possível identificar o remetente da mensagem.');
+
+        if (!body.startsWith(COMMAND_PREFIX)) {
+            if (respostaPendente?.has(telefone)) {
+                const pendente = respostaPendente.get(telefone);
+                if (pendente?.tipo === 'registro') {
+                    const escolha = parseInt(body, 10);
+                    if (Number.isNaN(escolha) || escolha < 1 || escolha > 4) return sendReply(message, 'Resposta inválida. Digite o número da opção (1 a 4).');
+                    const perguntaIndex = pendente.dados.perguntaAtual;
+                    const pergunta = pendente.perguntas[perguntaIndex];
+                    const opcao = pergunta.opcoes[escolha - 1];
+                    pendente.dados.karmaTotal += opcao.karma;
+                    pendente.dados.perguntaAtual++;
+                    await pendente.enviarProxima(message.from, pendente.dados);
+                    return;
+                }
+            }
+            if (npcDialogueSessions.has(telefone)) {
+                const player = await ensurePlayerExists(telefone, message);
+                if (!player) return;
+                const choice = parseInt(body, 10);
+                if (Number.isNaN(choice) || choice < 1 || choice > 4) return sendReply(message, 'Envie um número de 1 a 4 para responder ao NPC.');
+                await handleNpcChoice(await initializeNarrativeStats(player), message, choice);
+            }
+            return;
+        }
+
         const parts = body.slice(COMMAND_PREFIX.length).trim().split(/\s+/).filter(Boolean);
         const cmd = normalizeKey(parts[0] || '');
         const args = parts.slice(1);
-        const telefone = getSenderId(message);
-        if (!telefone) {
-            await sendReply(message, 'Não foi possível identificar o remetente.');
-            return;
-        }
 
         const commands = {
             registrar: cmdRegistrar,
             perfil: cmdPerfil,
             status: cmdPerfil,
             atributos: cmdPerfil,
-            inventario: cmdInventario,
-            equipamentos: cmdEquipamentos,
-            equipar: cmdEquipar,
-            desequipar: cmdDesequipar,
-            menu: cmdMenu,
-            ajuda: cmdAjuda,
-            guia: cmdGuia,
             mudaraparencia: cmdMudarAparencia,
-            descansar: cmdDescansar,
             cultivar: cmdCultivar,
-            romper: cmdRomper,
             tecnicas: cmdTecnicas,
             compreender: cmdCompreender,
             aprender: cmdAprender,
+            inventario: cmdInventario,
             usar: cmdUsarItem,
             usaritem: cmdUsarItem,
             usartecnica: cmdUsarTecnica,
             loja: cmdLoja,
-            profissao: cmdProfissao,
-            craftar: cmdCraftar,
-            receitas: (a, m, t) => cmdCraftar(['listar'], m, t),
-            subirprofissao: cmdSubirProfissao,
+            menu: cmdMenu,
+            ajuda: cmdAjuda,
+            descansar: cmdDescansar,
+            changelog: cmdChangelog,
             andar: cmdAndar,
             parar: cmdParar,
             dominio: cmdDominio,
-            bosses: cmdBosses,
-            boss: cmdBossAlias,
-            jogadores: cmdJogadores,
-            encontrar: cmdEncontrar,
-            trocar: cmdTrocar,
-            duelar: cmdDuelar,
-            aceitarduelo: cmdAceitarDuelo,
+            criarseita: cmdCriarSeita,
+            convidar: cmdConvidar,
+            aceitarconvite: cmdAceitarConvite,
+            sairseita: cmdSairSeita,
+            missoes: cmdMissoes,
+            aceitar: cmdAceitarMissao,
+            doar: cmdDoar,
+            tecnicaseita: cmdTecnicaSeita,
+            biblioteca: cmdBiblioteca,
+            aprender_seita: cmdAprenderSeita,
+            profissao: cmdProfissao,
+            craftar: cmdCraftar,
+            subirprofissao: cmdSubirProfissao,
             amigos: cmdAmigos,
             adicionaramigo: cmdAdicionarAmigo,
             inimigo: cmdInimigo,
             conversar: cmdConversar,
             lerchat: cmdLerChat,
-            npc: cmdNPCInteragir,
-            interagir: cmdNPCInteragir,
-            missoesnpc: cmdMissoesNPC,
-            missoes: cmdMissoes,
-            aceitar: cmdAceitarMissao,
-            completarmissao: cmdCompletarMissao,
             criarmissao: cmdCriarMissaoPessoal,
             minhasmissoes: cmdMinhasMissoes,
             missoesdisponiveis: cmdMissoesDisponiveis,
             aceitarmissao: cmdAceitarMissaoPessoal,
-            criarseita: cmdCriarSeita,
-            convidar: cmdConvidar,
-            aceitarconvite: cmdAceitarConvite,
-            sairseita: cmdSairSeita,
-            doar: cmdDoar,
-            tecnicaseita: cmdTecnicaSeita,
-            biblioteca: cmdBiblioteca,
-            aprender_seita: cmdAprenderSeita,
-            mercado: cmdMercadoGlobal,
+            completarmissao: cmdCompletarMissao,
             eventos: cmdEventos,
             ranking: cmdRanking,
-            changelog: cmdChangelog,
-            atacar: cmdAtacar,
-            defender: cmdDefender,
-            fugir: cmdFugir,
             banir: cmdBanir,
             daritem: cmdDarItem,
             resetar: cmdResetar,
-            anuncio: cmdAnuncio
+            anuncio: cmdAnuncio,
+            guia: cmdGuia,
+            romper: cmdRomper,
+            jogadores: cmdJogadores,
+            encontrar: cmdEncontrar,
+            trocar: cmdTrocar,
+            duelar: cmdDuelar,
+            aceitarduelo: typeof cmdAceitarDuelo === 'function' ? cmdAceitarDuelo : undefined,
+            mercado: cmdMercadoGlobal,
+            npc: cmdNPCInteragir,
+            interagir: cmdNPCInteragir,
+            atacar: cmdAtacar,
+            defender: cmdDefender,
+            fugir: cmdFugir,
+            rumores: cmdRumores,
+            missoesnpc: cmdMissoesNPC,
+            mestre: cmdMestre,
+            rival: cmdRival,
+            politicaseita: cmdPoliticaSeita,
+            retrato: cmdRetrato,
+            seita: cmdSeitaExtra
         };
-
-        if (commands[cmd]) {
-            await commands[cmd](args, message, telefone);
-        } else {
-            await sendReply(message, 'Comando desconhecido. Use `/menu`.');
-        }
+        if (commands[cmd]) return commands[cmd](args, message, telefone);
+        await sendReply(message, 'Comando desconhecido. Use `/menu`.');
     } catch (err) {
-        log(`Erro em processCommand V2: ${err?.stack || err}`, 'ERRO');
+        log(`Erro em processCommand v3: ${err?.stack || err}`, 'ERRO');
         await sendReply(message, 'Ocorreu um erro ao processar seu comando.');
     }
 }
 
-async function bootstrapGameplayV2() {
+async function bootstrapBot() {
     try {
-        await ensureSchemaUpdates();
+        await ensureStage3Schema();
         client.initialize();
     } catch (err) {
-        log(`Falha ao iniciar V2: ${err?.stack || err}`, 'ERRO');
+        log(`Falha no bootstrap do bot: ${err?.stack || err}`, 'ERRO');
+        process.exitCode = 1;
     }
 }
 
-bootstrapGameplayV2();
+bootstrapBot();

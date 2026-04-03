@@ -1,7 +1,7 @@
 {
   "name": "chasing-immortality",
-  "version": "2.0.0",
-  "description": "Bot de WhatsApp para RPG Wuxia/Xianxia com gameplay V2",
+  "version": "1.0.0",
+  "description": "Bot de WhatsApp para jogo Wuxia/Xianxia",
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js"
@@ -11,5 +11,8 @@
     "sqlite3": "^5.1.7",
     "qrcode-terminal": "^0.12.0",
     "chalk": "^4.1.2"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }

@@ -1,0 +1,9 @@
+ETAPA 3.1 — RETRATOS PERSISTENTES COM URL PÚBLICA
+- adicionadas funções utilitárias ausentes: normalizeKey, getQuery e allQuery
+- tabela entity_portraits expandida com entity_name, public_url, source_url, host_provider, mime_type, content_hash e updated_at
+- integração pronta com ImgBB via IMGBB_API_KEY
+- integração pronta com ImageKit via IMAGEKIT_PRIVATE_KEY + IMAGEKIT_URL_ENDPOINT
+- suporte opcional a IMAGE_PUBLIC_BASE_URL para self-host
+- /retrato agora gera, salva em cache e reaproveita sempre o mesmo retrato para npc/mob/região
+- URLs públicas são reaproveitadas automaticamente nas próximas aparições
+- README atualizado com as variáveis de ambiente
